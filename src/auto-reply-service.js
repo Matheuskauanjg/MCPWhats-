@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { whatsappEvents } from './whatsapp-events.js';
 import { getRuntimeConfig, runtimeConfigStatus } from './runtime-config.js';
+import { getState as getSupabaseState, setState as setSupabaseState, isSupabaseEnabled } from './supabase-sync.js';
 
 const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
@@ -334,30 +335,57 @@ export function startAutoReplyService({ bridgePort, audioPort }) {
   const bridge = (pathname, options) => api(`http://127.0.0.1:${bridgePort}`, pathname, options);
   const audio = (pathname, options) => api(`http://127.0.0.1:${audioPort}`, pathname, options);
 
+  function applySavedState(saved) {
+    if (!saved || typeof saved !== 'object') return false;
+    state = {
+      enabled: Boolean(saved?.enabled), enabledAt: Number(saved?.enabledAt || 0), pauseUntil: Number(saved?.pauseUntil || 0),
+      lastControlMessageId: saved?.lastControlMessageId || null,
+      orders: Array.isArray(saved?.orders) ? saved.orders.slice(-50) : [],
+      notes: Array.isArray(saved?.notes) ? saved.notes.slice(-50) : [],
+      watchers: Array.isArray(saved?.watchers) ? saved.watchers.slice(-50) : [],
+      nextWatcherId: Math.max(1, Number(saved?.nextWatcherId || 1)),
+      scheduled: Array.isArray(saved?.scheduled) ? saved.scheduled.slice(-100) : [],
+      nextScheduleId: Math.max(1, Number(saved?.nextScheduleId || 1))
+    };
+    return true;
+  }
+
   async function loadState() {
-    try {
-      const saved = JSON.parse(await fs.readFile(statePath, 'utf8'));
-      state = {
-        enabled: Boolean(saved?.enabled), enabledAt: Number(saved?.enabledAt || 0), pauseUntil: Number(saved?.pauseUntil || 0),
-        lastControlMessageId: saved?.lastControlMessageId || null,
-        orders: Array.isArray(saved?.orders) ? saved.orders.slice(-50) : [],
-        notes: Array.isArray(saved?.notes) ? saved.notes.slice(-50) : [],
-        watchers: Array.isArray(saved?.watchers) ? saved.watchers.slice(-50) : [],
-        nextWatcherId: Math.max(1, Number(saved?.nextWatcherId || 1)),
-        scheduled: Array.isArray(saved?.scheduled) ? saved.scheduled.slice(-100) : [],
-        nextScheduleId: Math.max(1, Number(saved?.nextScheduleId || 1))
-      };
-    } catch {}
+    let loadedFromSupabase = false;
+    if (isSupabaseEnabled()) {
+      try {
+        const remote = await getSupabaseState('auto_reply', 'primary');
+        loadedFromSupabase = applySavedState(remote);
+        if (loadedFromSupabase) console.log('[AutoReply] State restored from Supabase.');
+      } catch (error) {
+        console.warn('[AutoReply] Supabase state load failed:', error?.message || error);
+      }
+    }
+    if (!loadedFromSupabase) {
+      try {
+        applySavedState(JSON.parse(await fs.readFile(statePath, 'utf8')));
+      } catch {}
+    }
     state.orders = state.orders.filter(item => !item?.expiresAt || Number(item.expiresAt) > Date.now());
     if (state.pauseUntil && state.pauseUntil <= Date.now()) state.pauseUntil = 0;
   }
 
   async function saveState() {
+    state.orders = state.orders.filter(item => !item?.expiresAt || Number(item.expiresAt) > Date.now());
+    const snapshot = { ...state, updatedAt: new Date().toISOString() };
     try {
-      state.orders = state.orders.filter(item => !item?.expiresAt || Number(item.expiresAt) > Date.now());
       await fs.mkdir(path.dirname(statePath), { recursive: true });
-      await fs.writeFile(statePath, JSON.stringify({ ...state, updatedAt: new Date().toISOString() }, null, 2), 'utf8');
-    } catch (error) { console.warn('[AutoReply] state save failed:', error?.message || error); }
+      await fs.writeFile(statePath, JSON.stringify(snapshot, null, 2), 'utf8');
+    } catch (error) {
+      console.warn('[AutoReply] local state save failed:', error?.message || error);
+    }
+    if (isSupabaseEnabled()) {
+      try {
+        await setSupabaseState('auto_reply', 'primary', snapshot);
+      } catch (error) {
+        console.warn('[AutoReply] Supabase state save failed:', error?.message || error);
+      }
+    }
   }
 
   async function send(to, message) { return bridge('/api/send', { method: 'POST', body: JSON.stringify({ to, message }) }); }
@@ -664,7 +692,7 @@ export function startAutoReplyService({ bridgePort, audioPort }) {
     if (!NVIDIA_API_KEY) throw new Error('NVIDIA_API_KEY is not configured');
     const cfg = getRuntimeConfig();
     const model = String(cfg.nvidiaModel || NVIDIA_REPLY_MODEL || DEFAULT_NVIDIA_MODEL);
-    const temperature = Number.isFinite(Number(cfg.temperature)) ? Number(cfg.temperature) : 0.82;
+    const temperature = Math.min(1, Math.max(0, Number.isFinite(Number(cfg.temperature)) ? Number(cfg.temperature) : 0.82));
     const started = performance.now();
     const payload = await fetchJsonWithTimeout(NVIDIA_CHAT_URL, {
       method: 'POST',
