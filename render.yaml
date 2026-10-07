@@ -1,10 +1,10 @@
 services:
   - type: web
-    name: whatsapp-personal-bridge
-    runtime: docker
-    dockerfilePath: ./whatsapp-personal-render/Dockerfile
-    dockerContext: ./whatsapp-personal-render
-    plan: starter
+    name: mcpwhats
+    runtime: node
+    plan: free
+    buildCommand: npm install --omit=dev
+    startCommand: npm start
     healthCheckPath: /health
     autoDeploy: true
     envVars:
@@ -12,17 +12,37 @@ services:
         value: production
       - key: API_TOKEN
         sync: false
+      - key: MCP_LOGIN_SECRET
+        sync: false
       - key: QR_SECRET
         sync: false
       - key: PUBLIC_BASE_URL
         sync: false
-      - key: TUNNEL_TOKEN
-        sync: false
       - key: BAILEYS_AUTH_PATH
-        value: /var/data/baileys_auth
+        value: /tmp/baileys_auth
+      - key: WHATSAPP_DB_PATH
+        value: /tmp/whatsapp.sqlite
+      - key: AUTO_REPLY_STATE_PATH
+        value: /tmp/whatsapp-auto-reply.json
       - key: BAILEYS_LOG_LEVEL
         value: silent
-    disk:
-      name: whatsapp-session
-      mountPath: /var/data
-      sizeGB: 1
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_AUTH_BACKUP_INTERVAL_MS
+        value: "120000"
+      - key: AI_PROVIDER
+        value: auto
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: NVIDIA_API_KEY
+        sync: false
+      - key: GROQ_REPLY_MODEL
+        value: openai/gpt-oss-20b
+      - key: GEMINI_REPLY_MODEL
+        value: gemini-3.5-flash-lite
+      - key: NVIDIA_REPLY_MODEL
+        value: openai/gpt-oss-20b
