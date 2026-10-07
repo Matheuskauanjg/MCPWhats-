@@ -27,6 +27,8 @@ Leia antes de alterar infraestrutura:
 - [Estado atual](docs/CURRENT_STATUS.md)
 - [Arquitetura completa](docs/ARCHITECTURE.md)
 - [Supabase Keepalive](docs/SUPABASE_KEEPALIVE.md)
+- [Checklist de implantação](docs/DEPLOYMENT_CHECKLIST.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
 
 ---
 
@@ -677,7 +679,9 @@ limit 20;
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   ├── CURRENT_STATUS.md
-│   └── SUPABASE_KEEPALIVE.md
+│   ├── DEPLOYMENT_CHECKLIST.md
+│   ├── SUPABASE_KEEPALIVE.md
+│   └── TROUBLESHOOTING.md
 ├── render-postgres/
 │   └── setup.sql
 ├── supabase/
