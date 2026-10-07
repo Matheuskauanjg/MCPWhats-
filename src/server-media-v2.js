@@ -481,13 +481,13 @@ function withVisibleMentionPrefix(message, mentions, enabled = true) {
 }
 
 app.get('/', (_req, res) => {
-  res.type('html').send(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WhatsApp Personal Bridge</title></head><body style="font-family:Arial,sans-serif;max-width:760px;margin:40px auto;padding:0 20px"><h1>WhatsApp Personal Bridge · Media v2</h1><p>Status: <strong>${whatsappState}</strong></p><p><a href="/qr">Conectar WhatsApp por QR Code ou código</a></p></body></html>`);
+  res.type('html').send(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WhatsApp Personal Bridge</title></head><body style="font-family:Arial,sans-serif;max-width:760px;margin:40px auto;padding:0 20px"><h1>MCPWhats</h1><p>Status: <strong>${whatsappState}</strong></p><p><a href="/qr">Conectar WhatsApp por QR Code ou código</a></p></body></html>`);
 });
 
 app.get('/health', (_req, res) => {
   res.json({
     ok: true,
-    service: 'whatsapp-personal-render-media-v2',
+    service: 'mcpwhats',
     whatsappState,
     ready: isReady(),
     hasQr: Boolean(latestQrDataUrl),
