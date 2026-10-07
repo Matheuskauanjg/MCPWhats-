@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { whatsappEvents } from './whatsapp-events.js';
 import { getRuntimeConfig, runtimeConfigStatus } from './runtime-config.js';
-import { getState as getSupabaseState, setState as setSupabaseState, isSupabaseEnabled } from './supabase-sync.js';
+import { getState as getRemoteState, setState as setRemoteState, isPersistenceEnabled, persistenceBackend } from './supabase-sync.js';
 
 const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
@@ -352,13 +352,13 @@ export function startAutoReplyService({ bridgePort, audioPort }) {
 
   async function loadState() {
     let loadedFromSupabase = false;
-    if (isSupabaseEnabled()) {
+    if (isPersistenceEnabled()) {
       try {
-        const remote = await getSupabaseState('auto_reply', 'primary');
+        const remote = await getRemoteState('auto_reply', 'primary');
         loadedFromSupabase = applySavedState(remote);
-        if (loadedFromSupabase) console.log('[AutoReply] State restored from Supabase.');
+        if (loadedFromSupabase) console.log(`[AutoReply] State restored from ${persistenceBackend()}.`);
       } catch (error) {
-        console.warn('[AutoReply] Supabase state load failed:', error?.message || error);
+        console.warn('[AutoReply] remote state load failed:', error?.message || error);
       }
     }
     if (!loadedFromSupabase) {
@@ -379,11 +379,11 @@ export function startAutoReplyService({ bridgePort, audioPort }) {
     } catch (error) {
       console.warn('[AutoReply] local state save failed:', error?.message || error);
     }
-    if (isSupabaseEnabled()) {
+    if (isPersistenceEnabled()) {
       try {
-        await setSupabaseState('auto_reply', 'primary', snapshot);
+        await setRemoteState('auto_reply', 'primary', snapshot);
       } catch (error) {
-        console.warn('[AutoReply] Supabase state save failed:', error?.message || error);
+        console.warn('[AutoReply] remote state save failed:', error?.message || error);
       }
     }
   }
