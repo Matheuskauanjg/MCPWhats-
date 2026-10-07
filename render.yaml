@@ -57,6 +57,30 @@ services:
       - key: PERSISTENCE_BACKUP_INTERVAL_MS
         value: "120000"
 
+      # Memory/backpressure tuning for the free instance.
+      - key: WHATSAPP_SYNC_FULL_HISTORY
+        value: "false"
+      - key: WHATSAPP_MEMORY_MESSAGES_PER_CHAT
+        value: "40"
+      - key: WHATSAPP_MEMORY_CHAT_BUCKETS
+        value: "120"
+      - key: REMOTE_MIRROR_CONCURRENCY
+        value: "2"
+      - key: REMOTE_MIRROR_MAX_QUEUE
+        value: "400"
+      - key: REMOTE_MIRROR_RETRIES
+        value: "2"
+      - key: REMOTE_HYDRATE_CHATS
+        value: "500"
+      - key: REMOTE_HYDRATE_CONTACTS
+        value: "1500"
+      - key: REMOTE_HYDRATE_MESSAGES
+        value: "1500"
+      - key: REMOTE_HYDRATE_MAPPINGS
+        value: "2000"
+      - key: MAX_REMOTE_RAW_MESSAGE_BYTES
+        value: "32768"
+
       - key: AI_PROVIDER
         value: auto
       - key: GROQ_API_KEY

@@ -3,6 +3,21 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { isPersistenceEnabled, persistenceBackend, setState as setRemoteState, listState as listRemoteState } from './supabase-sync.js';
 
+function envInt(name, fallback, min, max) {
+  const value = Number(process.env[name]);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(min, Math.min(max, Math.trunc(value)));
+}
+
+const REMOTE_MIRROR_CONCURRENCY = envInt('REMOTE_MIRROR_CONCURRENCY', 2, 1, 8);
+const REMOTE_MIRROR_MAX_QUEUE = envInt('REMOTE_MIRROR_MAX_QUEUE', 400, 50, 5000);
+const REMOTE_MIRROR_RETRIES = envInt('REMOTE_MIRROR_RETRIES', 2, 0, 5);
+const REMOTE_HYDRATE_CHATS = envInt('REMOTE_HYDRATE_CHATS', 500, 1, 2000);
+const REMOTE_HYDRATE_CONTACTS = envInt('REMOTE_HYDRATE_CONTACTS', 1500, 1, 5000);
+const REMOTE_HYDRATE_MESSAGES = envInt('REMOTE_HYDRATE_MESSAGES', 1500, 1, 5000);
+const REMOTE_HYDRATE_MAPPINGS = envInt('REMOTE_HYDRATE_MAPPINGS', 2000, 1, 5000);
+const MAX_REMOTE_RAW_MESSAGE_BYTES = envInt('MAX_REMOTE_RAW_MESSAGE_BYTES', 32768, 0, 262144);
+
 function safeJson(value) {
   try {
     return JSON.stringify(value, (_key, item) => typeof item === 'bigint' ? item.toString() : item);
@@ -29,10 +44,75 @@ function normalizeMapping(lid, pn) {
 }
 
 export function createPersistentStore(dbPath) {
+  const mirrorQueue = new Map();
+  let mirrorActive = 0;
+  let mirrorTimer = null;
+  let mirrorDropped = 0;
+  let mirrorFailed = 0;
+
+  function scheduleMirrorPump(delayMs = 0) {
+    if (mirrorTimer) return;
+    mirrorTimer = setTimeout(() => {
+      mirrorTimer = null;
+      pumpMirrorQueue();
+    }, Math.max(0, delayMs));
+    mirrorTimer.unref?.();
+  }
+
+  function queueMirrorJob(jobId, job) {
+    if (mirrorQueue.has(jobId)) {
+      // Coalesce repeated updates for the same row; keep only the newest value.
+      mirrorQueue.delete(jobId);
+    } else if (mirrorQueue.size >= REMOTE_MIRROR_MAX_QUEUE) {
+      const oldest = mirrorQueue.keys().next().value;
+      if (oldest) mirrorQueue.delete(oldest);
+      mirrorDropped += 1;
+      if (mirrorDropped === 1 || mirrorDropped % 100 === 0) {
+        console.warn(`[Persistence] Remote mirror queue full; dropped ${mirrorDropped} stale pending update(s).`);
+      }
+    }
+    mirrorQueue.set(jobId, job);
+    scheduleMirrorPump();
+  }
+
+  function pumpMirrorQueue() {
+    if (!isPersistenceEnabled()) {
+      mirrorQueue.clear();
+      return;
+    }
+
+    while (mirrorActive < REMOTE_MIRROR_CONCURRENCY && mirrorQueue.size) {
+      const next = mirrorQueue.entries().next().value;
+      if (!next) break;
+      const [jobId, job] = next;
+      mirrorQueue.delete(jobId);
+      mirrorActive += 1;
+
+      void setRemoteState(job.namespace, job.key, job.value)
+        .catch(error => {
+          if ((job.attempt || 0) < REMOTE_MIRROR_RETRIES && mirrorQueue.size < REMOTE_MIRROR_MAX_QUEUE) {
+            queueMirrorJob(jobId, { ...job, attempt: (job.attempt || 0) + 1 });
+            return;
+          }
+          mirrorFailed += 1;
+          console.warn(`[Persistence] Mirror ${job.namespace}/${job.key} failed:`, error?.message || error);
+        })
+        .finally(() => {
+          mirrorActive -= 1;
+          scheduleMirrorPump();
+        });
+    }
+  }
+
   function mirrorState(namespace, key, value) {
     if (!isPersistenceEnabled()) return;
-    void setRemoteState(namespace, key, value).catch(error => {
-      console.warn(`[Persistence] Mirror ${namespace}/${key} failed:`, error?.message || error);
+    const ns = String(namespace);
+    const itemKey = String(key);
+    queueMirrorJob(`${ns}\u0000${itemKey}`, {
+      namespace: ns,
+      key: itemKey,
+      value,
+      attempt: 0
     });
   }
 
@@ -187,6 +267,11 @@ export function createPersistentStore(dbPath) {
       pushName: rawMessage.pushName || null,
       messageTimestamp: serialized.timestamp ?? null
     } : null;
+    const rawJson = safeJson(rawForStorage);
+    const rawBytes = rawJson ? Buffer.byteLength(rawJson) : 0;
+    const rawForRemote = MAX_REMOTE_RAW_MESSAGE_BYTES > 0 && rawBytes <= MAX_REMOTE_RAW_MESSAGE_BYTES
+      ? rawForStorage
+      : null;
     upsertMessageStmt.run(
       chatId,
       messageId,
@@ -197,10 +282,9 @@ export function createPersistentStore(dbPath) {
       serialized?.type ?? null,
       serialized?.pushName ?? null,
       safeJson(serialized?.audio ?? null),
-      safeJson(rawForStorage),
+      rawJson,
       Date.now()
     );
-    upsertChat({ id: chatId, timestamp: serialized?.timestamp ?? null }, mirrorRemote);
     if (mirrorRemote) mirrorState('message', `${chatId}|${messageId}`, {
       serialized: {
         id: messageId,
@@ -213,7 +297,7 @@ export function createPersistentStore(dbPath) {
         pushName: serialized?.pushName ?? null,
         audio: serialized?.audio ?? null
       },
-      rawMessage: rawForStorage
+      rawMessage: rawForRemote
     });
   }
 
@@ -225,13 +309,13 @@ export function createPersistentStore(dbPath) {
     return true;
   }
 
-  function inferAndStoreMappings(key) {
+  function inferAndStoreMappings(key, mirrorRemote = true) {
     if (!key || typeof key !== 'object') return;
     const pairs = [
       [key.remoteJid, key.remoteJidAlt],
       [key.participant, key.participantAlt]
     ];
-    for (const [a, b] of pairs) upsertLidMapping(a, b);
+    for (const [a, b] of pairs) upsertLidMapping(a, b, mirrorRemote);
   }
 
   function rowToMessage(row) {
@@ -330,10 +414,25 @@ export function createPersistentStore(dbPath) {
     const messages = db.prepare('SELECT COUNT(*) AS count FROM messages').get()?.count || 0;
     const chats = db.prepare('SELECT COUNT(*) AS count FROM chats').get()?.count || 0;
     const mappings = db.prepare('SELECT COUNT(*) AS count FROM jid_mapping').get()?.count || 0;
-    return { path: resolved, messages: Number(messages), chats: Number(chats), jidMappings: Number(mappings) };
+    return {
+      path: resolved,
+      messages: Number(messages),
+      chats: Number(chats),
+      jidMappings: Number(mappings),
+      remoteMirror: {
+        backend: persistenceBackend(),
+        queued: mirrorQueue.size,
+        active: mirrorActive,
+        concurrency: REMOTE_MIRROR_CONCURRENCY,
+        maxQueue: REMOTE_MIRROR_MAX_QUEUE,
+        dropped: mirrorDropped,
+        failed: mirrorFailed
+      }
+    };
   }
 
   function close() {
+    if (mirrorTimer) clearTimeout(mirrorTimer);
     try { db.close(); } catch {}
   }
 
@@ -360,35 +459,26 @@ export function createPersistentStore(dbPath) {
 export async function hydratePersistentStoreFromSupabase(store) {
   if (!isPersistenceEnabled() || !store) return { enabled: false, chats: 0, contacts: 0, messages: 0, mappings: 0 };
 
-  const [chatRows, contactRows, messageRows, mappingRows] = await Promise.all([
-    listRemoteState('chat', 1000),
-    listRemoteState('contact', 5000),
-    listRemoteState('message', 5000),
-    listRemoteState('jid_mapping', 5000)
-  ]);
+  async function hydrateNamespace(namespace, limit, apply) {
+    const rows = await listRemoteState(namespace, limit);
+    for (let index = rows.length - 1; index >= 0; index -= 1) {
+      const row = rows[index];
+      if (row?.value) apply(row.value);
+    }
+    return rows.length;
+  }
 
-  for (const row of [...chatRows].reverse()) {
-    if (row?.value) store.upsertChat(row.value, false);
-  }
-  for (const row of [...contactRows].reverse()) {
-    if (row?.value) store.upsertContact(row.value, false);
-  }
-  for (const row of [...messageRows].reverse()) {
-    const value = row?.value;
+  // Hydrate one namespace at a time to avoid holding every remote dataset in RAM simultaneously.
+  const chats = await hydrateNamespace('chat', REMOTE_HYDRATE_CHATS, value => store.upsertChat(value, false));
+  const contacts = await hydrateNamespace('contact', REMOTE_HYDRATE_CONTACTS, value => store.upsertContact(value, false));
+  const messages = await hydrateNamespace('message', REMOTE_HYDRATE_MESSAGES, value => {
     if (value?.serialized) store.upsertMessage(value.serialized, value.rawMessage || null, false);
-  }
-  for (const row of [...mappingRows].reverse()) {
-    const value = row?.value;
+  });
+  const mappings = await hydrateNamespace('jid_mapping', REMOTE_HYDRATE_MAPPINGS, value => {
     if (value?.lid && value?.pn) store.upsertLidMapping(value.lid, value.pn, false);
-  }
+  });
 
-  const result = {
-    enabled: true,
-    chats: chatRows.length,
-    contacts: contactRows.length,
-    messages: messageRows.length,
-    mappings: mappingRows.length
-  };
+  const result = { enabled: true, chats, contacts, messages, mappings };
   console.log(`[Persistence] Hydrated persistent WhatsApp cache from ${persistenceBackend()}:`, result);
   return result;
 }

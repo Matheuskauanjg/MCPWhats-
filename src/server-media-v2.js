@@ -29,7 +29,15 @@ const DB_PATH = process.env.WHATSAPP_DB_PATH || (
 );
 const logger = pino({ level: process.env.BAILEYS_LOG_LEVEL || 'silent' });
 
-const MAX_MESSAGES_PER_CHAT = 300;
+function envInt(name, fallback, min, max) {
+  const value = Number(process.env[name]);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(min, Math.min(max, Math.trunc(value)));
+}
+
+const MAX_MESSAGES_PER_CHAT = envInt('WHATSAPP_MEMORY_MESSAGES_PER_CHAT', 40, 5, 150);
+const MAX_MEMORY_CHAT_BUCKETS = envInt('WHATSAPP_MEMORY_CHAT_BUCKETS', 120, 10, 500);
+const SYNC_FULL_HISTORY = /^(1|true|yes|on)$/i.test(String(process.env.WHATSAPP_SYNC_FULL_HISTORY || 'false'));
 const MAX_IMAGE_INPUT_BYTES = 12 * 1024 * 1024;
 const MAX_AUDIO_BYTES = 12 * 1024 * 1024;
 
@@ -164,39 +172,60 @@ function serializeChat(chat) {
   };
 }
 
-function upsertChat(chat) {
+function upsertChat(chat, mirrorRemote = true) {
   const id = chat?.id || chat?.jid;
   if (!id) return;
   const merged = { ...(chats.get(id) || {}), ...chat, id };
   chats.set(id, merged);
-  persistentStore.upsertChat(serializeChat(merged));
+  persistentStore.upsertChat(serializeChat(merged), mirrorRemote);
 }
 
-function upsertContact(contact) {
+function upsertContact(contact, mirrorRemote = true) {
   const id = contact?.id;
   if (!id) return;
   const merged = { ...(contacts.get(id) || {}), ...contact };
   contacts.set(id, merged);
-  persistentStore.upsertContact(merged);
+  persistentStore.upsertContact(merged, mirrorRemote);
 }
 
-function cacheMessage(message) {
+function trimRawMessageCache(currentJid) {
+  while (messagesByChat.size > MAX_MEMORY_CHAT_BUCKETS) {
+    const oldest = messagesByChat.keys().next().value;
+    if (!oldest) break;
+    if (oldest === currentJid && messagesByChat.size > 1) {
+      const iterator = messagesByChat.keys();
+      iterator.next();
+      const second = iterator.next().value;
+      if (!second) break;
+      messagesByChat.delete(second);
+    } else {
+      messagesByChat.delete(oldest);
+    }
+  }
+}
+
+function cacheMessage(message, { mirrorRemote = true, cacheInMemory = true, storeRaw = true } = {}) {
   const jid = message?.key?.remoteJid;
   if (!jid) return null;
-  const current = messagesByChat.get(jid) || [];
-  const id = message?.key?.id;
-  const withoutDuplicate = id ? current.filter(item => item?.key?.id !== id) : current;
-  withoutDuplicate.push(message);
-  withoutDuplicate.sort((a, b) => (toNumber(a?.messageTimestamp) || 0) - (toNumber(b?.messageTimestamp) || 0));
-  if (withoutDuplicate.length > MAX_MESSAGES_PER_CHAT) {
-    withoutDuplicate.splice(0, withoutDuplicate.length - MAX_MESSAGES_PER_CHAT);
+  if (cacheInMemory) {
+    const current = messagesByChat.get(jid) || [];
+    const id = message?.key?.id;
+    const withoutDuplicate = id ? current.filter(item => item?.key?.id !== id) : current;
+    withoutDuplicate.push(message);
+    withoutDuplicate.sort((a, b) => (toNumber(a?.messageTimestamp) || 0) - (toNumber(b?.messageTimestamp) || 0));
+    if (withoutDuplicate.length > MAX_MESSAGES_PER_CHAT) {
+      withoutDuplicate.splice(0, withoutDuplicate.length - MAX_MESSAGES_PER_CHAT);
+    }
+    // Reinsert to make Map insertion order work as a small LRU by chat.
+    messagesByChat.delete(jid);
+    messagesByChat.set(jid, withoutDuplicate);
+    trimRawMessageCache(jid);
   }
-  messagesByChat.set(jid, withoutDuplicate);
 
   const serialized = serializeMessage(message);
-  persistentStore.inferAndStoreMappings(message?.key);
-  persistentStore.upsertMessage(serialized, message);
-  upsertChat({ id: jid, conversationTimestamp: serialized.timestamp || Math.floor(Date.now() / 1000) });
+  persistentStore.inferAndStoreMappings(message?.key, mirrorRemote);
+  persistentStore.upsertMessage(serialized, storeRaw ? message : null, mirrorRemote);
+  upsertChat({ id: jid, conversationTimestamp: serialized.timestamp || Math.floor(Date.now() / 1000) }, mirrorRemote);
   return serialized;
 }
 
@@ -365,7 +394,7 @@ async function connectWhatsApp() {
     printQRInTerminal: false,
     markOnlineOnConnect: false,
     emitOwnEvents: true,
-    syncFullHistory: true,
+    syncFullHistory: SYNC_FULL_HISTORY,
     generateHighQualityLinkPreview: false
   });
 
@@ -377,11 +406,15 @@ async function connectWhatsApp() {
   });
 
   currentSock.ev.on('messaging-history.set', ({ chats: historyChats, contacts: historyContacts, messages, lidPnMappings }) => {
-    for (const chat of historyChats || []) upsertChat(chat);
-    for (const contact of historyContacts || []) upsertContact(contact);
-    for (const mapping of lidPnMappings || []) persistentStore.upsertLidMapping(mapping?.lid, mapping?.pn);
-    for (const message of messages || []) cacheMessage(message);
-    console.log(`[Baileys] Histórico: ${historyChats?.length || 0} chats, ${messages?.length || 0} mensagens.`);
+    // Initial WhatsApp history can arrive as a large burst. Keep it local only:
+    // live events are mirrored remotely through the bounded queue.
+    for (const chat of historyChats || []) upsertChat(chat, false);
+    for (const contact of historyContacts || []) upsertContact(contact, false);
+    for (const mapping of lidPnMappings || []) persistentStore.upsertLidMapping(mapping?.lid, mapping?.pn, false);
+    for (const message of messages || []) {
+      cacheMessage(message, { mirrorRemote: false, cacheInMemory: false, storeRaw: false });
+    }
+    console.log(`[Baileys] Histórico local: ${historyChats?.length || 0} chats, ${historyContacts?.length || 0} contatos, ${messages?.length || 0} mensagens (mirror remoto suprimido).`);
   });
   currentSock.ev.on('chats.upsert', update => { for (const chat of update || []) upsertChat(chat); });
   currentSock.ev.on('chats.update', update => { for (const chat of update || []) upsertChat(chat); });
@@ -495,6 +528,12 @@ app.get('/health', (_req, res) => {
     pairingMode: pairingModeActive,
     pairingCodeGeneratedAt: latestPairingAt,
     cachedChats: chats.size,
+    rawMessageChatBuckets: messagesByChat.size,
+    memoryMb: {
+      rss: Math.round(process.memoryUsage().rss / 1024 / 1024),
+      heapUsed: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+      heapTotal: Math.round(process.memoryUsage().heapTotal / 1024 / 1024)
+    },
     authPath: AUTH_PATH,
     database: persistentStore.stats(),
     lastError
@@ -834,6 +873,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`[HTTP] Media v2 listening on 0.0.0.0:${PORT}`);
   console.log(`[Baileys] Auth path: ${AUTH_PATH}`);
   console.log(`[SQLite] Persistent history: ${persistentStore.path}`);
+  console.log(`[Memory] syncFullHistory=${SYNC_FULL_HISTORY} rawMessagesPerChat=${MAX_MESSAGES_PER_CHAT} rawChatBuckets=${MAX_MEMORY_CHAT_BUCKETS}`);
   connectWhatsApp().catch(error => {
     whatsappState = 'initialization_error';
     lastError = error.message;

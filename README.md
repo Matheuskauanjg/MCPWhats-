@@ -15,7 +15,8 @@ MCPWhats conecta um WhatsApp pessoal ao ChatGPT por **MCP + OAuth**, com leitura
 | Backend de persistência | ✅ `supabase-proxy` |
 | Escrita de configuração | ✅ Testada |
 | Keepalive Supabase → Render | ✅ Ativo e HTTP 200 |
-| WhatsApp | 🟡 Aguardando novo pareamento |
+| WhatsApp | ✅ Sessão salva/restaurada pelo Supabase |
+| Proteção contra OOM | ✅ Fila remota + histórico inicial local + cache raw limitado |
 | GitHub Actions keepalive | ❌ Não usado |
 
 > **Arquitetura correta:** MCPWhats reutiliza o Supabase compartilhado já existente. O isolamento é feito por tabelas, Edge Functions e segredos com prefixo/escopo MCPWhats. Não é necessário criar outro projeto Supabase.
@@ -93,7 +94,9 @@ Os arquivos da sessão são salvos no namespace:
 mcpwhats_state.namespace = baileys_auth
 ```
 
-A sessão anterior foi perdida antes da ligação do Supabase, porque estava apenas em `/tmp`. Portanto é necessário escanear o QR **uma última vez**. Depois do pareamento, o backup da sessão será enviado ao Supabase e poderá ser restaurado após restart/redeploy.
+A sessão atual já foi salva e restaurada com sucesso pelo Supabase. O processo local continua usando `/tmp`, porém `baileys_auth` é restaurado antes do socket abrir e recebe backup remoto.
+
+Para caber no Render Free, o histórico inicial do WhatsApp não dispara mais uma gravação remota por item. Eventos novos continuam sendo espelhados por uma fila com backpressure. O cache de mensagens raw em RAM também é limitado.
 
 ## Supabase compartilhado
 
