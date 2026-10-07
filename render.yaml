@@ -1,8 +1,17 @@
+databases:
+  - name: mcpwhats-db
+    plan: free
+    region: virginia
+    postgresMajorVersion: "18"
+    databaseName: mcpwhats_db
+    user: mcpwhats_db_user
+
 services:
   - type: web
-    name: mcpwhats
+    name: mcpwhats-personal
     runtime: node
     plan: free
+    region: virginia
     buildCommand: npm install --omit=dev
     startCommand: npm start
     healthCheckPath: /health
@@ -18,6 +27,10 @@ services:
         sync: false
       - key: PUBLIC_BASE_URL
         sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: mcpwhats-db
+          property: connectionString
       - key: BAILEYS_AUTH_PATH
         value: /tmp/baileys_auth
       - key: WHATSAPP_DB_PATH
@@ -26,14 +39,14 @@ services:
         value: /tmp/whatsapp-auto-reply.json
       - key: BAILEYS_LOG_LEVEL
         value: silent
+      - key: PERSISTENCE_BACKUP_INTERVAL_MS
+        value: "120000"
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SECRET_KEY
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
-      - key: SUPABASE_AUTH_BACKUP_INTERVAL_MS
-        value: "120000"
       - key: AI_PROVIDER
         value: auto
       - key: GROQ_API_KEY
