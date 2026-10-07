@@ -6,6 +6,7 @@ const { Pool } = pg;
 
 const SUPABASE_URL = String(process.env.SUPABASE_URL || '').trim().replace(/\/$/, '');
 const SUPABASE_ADMIN_KEY = String(process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+const SUPABASE_SYNC_SECRET = String(process.env.MCPWHATS_SYNC_SECRET || '').trim();
 const DATABASE_URL = String(process.env.DATABASE_URL || '').trim();
 const MAX_AUTH_FILE_BYTES = 2 * 1024 * 1024;
 const SETTINGS_NAMESPACE = '__settings__';
@@ -13,8 +14,16 @@ const SETTINGS_NAMESPACE = '__settings__';
 let pgPool = null;
 let pgReady = null;
 
-export function isSupabaseEnabled() {
+export function isSupabaseDirectEnabled() {
   return Boolean(SUPABASE_URL && SUPABASE_ADMIN_KEY);
+}
+
+export function isSupabaseProxyEnabled() {
+  return Boolean(SUPABASE_URL && SUPABASE_SYNC_SECRET);
+}
+
+export function isSupabaseEnabled() {
+  return isSupabaseDirectEnabled() || isSupabaseProxyEnabled();
 }
 
 export function isPostgresEnabled() {
@@ -26,7 +35,8 @@ export function isPersistenceEnabled() {
 }
 
 export function persistenceBackend() {
-  if (isSupabaseEnabled()) return 'supabase';
+  if (isSupabaseDirectEnabled()) return 'supabase';
+  if (isSupabaseProxyEnabled()) return 'supabase-proxy';
   if (isPostgresEnabled()) return 'postgres';
   return 'local-only';
 }
@@ -44,7 +54,7 @@ function authHeaders(extra = {}) {
 }
 
 async function rest(table, { method = 'GET', query = '', body, prefer, headers: extraHeaders = {} } = {}) {
-  if (!isSupabaseEnabled()) throw new Error('Supabase backend is not configured');
+  if (!isSupabaseDirectEnabled()) throw new Error('Direct Supabase backend is not configured');
   const response = await fetch(`${SUPABASE_URL}/rest/v1/${table}${query ? `?${query}` : ''}`, {
     method,
     headers: authHeaders({ ...extraHeaders, ...(prefer ? { prefer } : {}) }),
@@ -54,6 +64,25 @@ async function rest(table, { method = 'GET', query = '', body, prefer, headers: 
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = text; }
   if (!response.ok) throw new Error(`Supabase ${table} HTTP ${response.status}: ${typeof data === 'string' ? data.slice(0, 300) : JSON.stringify(data)}`);
+  return data;
+}
+
+async function proxyCall(op, payload = {}) {
+  if (!isSupabaseProxyEnabled()) throw new Error('Supabase proxy backend is not configured');
+  const response = await fetch(`${SUPABASE_URL}/functions/v1/mcpwhats-storage`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-mcpwhats-sync-secret': SUPABASE_SYNC_SECRET
+    },
+    body: JSON.stringify({ op, ...payload })
+  });
+  const text = await response.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+  if (!response.ok) {
+    throw new Error(`Supabase proxy HTTP ${response.status}: ${typeof data === 'string' ? data.slice(0, 300) : JSON.stringify(data)}`);
+  }
   return data;
 }
 
@@ -125,17 +154,21 @@ async function pgList(namespace, limit = 5000) {
 }
 
 export async function getSetting(key) {
-  if (isSupabaseEnabled()) {
+  if (isSupabaseDirectEnabled()) {
     const rows = await rest('mcpwhats_settings', {
       query: `key=eq.${encodeURIComponent(String(key))}&select=value&limit=1`
     });
     return Array.isArray(rows) && rows.length ? rows[0].value : null;
   }
+  if (isSupabaseProxyEnabled()) {
+    const result = await proxyCall('get_setting', { key: String(key) });
+    return result?.value ?? null;
+  }
   return pgGet(SETTINGS_NAMESPACE, key);
 }
 
 export async function setSetting(key, value) {
-  if (isSupabaseEnabled()) {
+  if (isSupabaseDirectEnabled()) {
     await rest('mcpwhats_settings', {
       method: 'POST',
       query: 'on_conflict=key',
@@ -144,21 +177,29 @@ export async function setSetting(key, value) {
     });
     return true;
   }
+  if (isSupabaseProxyEnabled()) {
+    await proxyCall('set_setting', { key: String(key), value });
+    return true;
+  }
   return pgSet(SETTINGS_NAMESPACE, key, value);
 }
 
 export async function getState(namespace, key) {
-  if (isSupabaseEnabled()) {
+  if (isSupabaseDirectEnabled()) {
     const rows = await rest('mcpwhats_state', {
       query: `namespace=eq.${encodeURIComponent(String(namespace))}&key=eq.${encodeURIComponent(String(key))}&select=value&limit=1`
     });
     return Array.isArray(rows) && rows.length ? rows[0].value : null;
   }
+  if (isSupabaseProxyEnabled()) {
+    const result = await proxyCall('get_state', { namespace: String(namespace), key: String(key) });
+    return result?.value ?? null;
+  }
   return pgGet(namespace, key);
 }
 
 export async function setState(namespace, key, value) {
-  if (isSupabaseEnabled()) {
+  if (isSupabaseDirectEnabled()) {
     await rest('mcpwhats_state', {
       method: 'POST',
       query: 'on_conflict=namespace,key',
@@ -167,13 +208,17 @@ export async function setState(namespace, key, value) {
     });
     return true;
   }
+  if (isSupabaseProxyEnabled()) {
+    await proxyCall('set_state', { namespace: String(namespace), key: String(key), value });
+    return true;
+  }
   return pgSet(namespace, key, value);
 }
 
 export async function listState(namespace, limit = 5000) {
-  if (isSupabaseEnabled()) {
-    const max = Math.max(1, Math.min(Number(limit) || 5000, 20000));
-    const pageSize = 500;
+  const max = Math.max(1, Math.min(Number(limit) || 5000, 20000));
+  const pageSize = 500;
+  if (isSupabaseDirectEnabled()) {
     const rows = [];
     for (let start = 0; start < max; start += pageSize) {
       const end = Math.min(start + pageSize - 1, max - 1);
@@ -184,6 +229,21 @@ export async function listState(namespace, limit = 5000) {
       if (!Array.isArray(page) || !page.length) break;
       rows.push(...page);
       if (page.length < pageSize) break;
+    }
+    return rows.slice(0, max);
+  }
+  if (isSupabaseProxyEnabled()) {
+    const rows = [];
+    for (let offset = 0; offset < max; offset += pageSize) {
+      const page = await proxyCall('list_state', {
+        namespace: String(namespace),
+        offset,
+        limit: Math.min(pageSize, max - offset)
+      });
+      const items = Array.isArray(page?.rows) ? page.rows : [];
+      if (!items.length) break;
+      rows.push(...items);
+      if (items.length < pageSize) break;
     }
     return rows.slice(0, max);
   }
