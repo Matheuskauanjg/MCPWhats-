@@ -1,6 +1,10 @@
 name: Keep MCPWhats Render Awake
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/render-keepalive.yml"
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
