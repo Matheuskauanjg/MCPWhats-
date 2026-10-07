@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { isSupabaseEnabled, setState as setSupabaseState, listState as listSupabaseState } from './supabase-sync.js';
 
 function safeJson(value) {
   try {
@@ -28,6 +29,13 @@ function normalizeMapping(lid, pn) {
 }
 
 export function createPersistentStore(dbPath) {
+  function mirrorState(namespace, key, value) {
+    if (!isSupabaseEnabled()) return;
+    void setSupabaseState(namespace, key, value).catch(error => {
+      console.warn(`[Supabase] Mirror ${namespace}/${key} failed:`, error?.message || error);
+    });
+  }
+
   const resolved = path.resolve(dbPath);
   fs.mkdirSync(path.dirname(resolved), { recursive: true });
 
@@ -127,7 +135,7 @@ export function createPersistentStore(dbPath) {
     ON CONFLICT(lid) DO UPDATE SET pn=excluded.pn, updated_at=excluded.updated_at
   `);
 
-  function upsertChat(chat) {
+  function upsertChat(chat, mirrorRemote = true) {
     const id = String(chat?.id || chat?.chatId || '').trim();
     if (!id) return;
     const now = Date.now();
@@ -140,9 +148,17 @@ export function createPersistentStore(dbPath) {
       boolInt(chat?.pinned),
       now
     );
+    if (mirrorRemote) mirrorState('chat', id, {
+      id,
+      name: chat?.name ?? null,
+      unreadCount: Number(chat?.unreadCount || 0),
+      timestamp: Number.isFinite(Number(chat?.timestamp)) ? Number(chat.timestamp) : null,
+      archived: Boolean(chat?.archived),
+      pinned: Boolean(chat?.pinned)
+    });
   }
 
-  function upsertContact(contact) {
+  function upsertContact(contact, mirrorRemote = true) {
     const id = String(contact?.id || '').trim();
     if (!id) return;
     upsertContactStmt.run(
@@ -153,9 +169,15 @@ export function createPersistentStore(dbPath) {
       safeJson(contact),
       Date.now()
     );
+    if (mirrorRemote) mirrorState('contact', id, {
+      id,
+      name: contact?.name ?? null,
+      notify: contact?.notify ?? null,
+      verifiedName: contact?.verifiedName ?? null
+    });
   }
 
-  function upsertMessage(serialized, rawMessage = null) {
+  function upsertMessage(serialized, rawMessage = null, mirrorRemote = true) {
     const chatId = String(serialized?.chatId || '').trim();
     const messageId = String(serialized?.id || '').trim();
     if (!chatId || !messageId) return;
@@ -178,13 +200,28 @@ export function createPersistentStore(dbPath) {
       safeJson(rawForStorage),
       Date.now()
     );
-    upsertChat({ id: chatId, timestamp: serialized?.timestamp ?? null });
+    upsertChat({ id: chatId, timestamp: serialized?.timestamp ?? null }, mirrorRemote);
+    if (mirrorRemote) mirrorState('message', `${chatId}|${messageId}`, {
+      serialized: {
+        id: messageId,
+        chatId,
+        participant: serialized?.participant ?? null,
+        fromMe: Boolean(serialized?.fromMe),
+        text: serialized?.text ?? '',
+        timestamp: Number.isFinite(Number(serialized?.timestamp)) ? Number(serialized.timestamp) : null,
+        type: serialized?.type ?? null,
+        pushName: serialized?.pushName ?? null,
+        audio: serialized?.audio ?? null
+      },
+      rawMessage: rawForStorage
+    });
   }
 
-  function upsertLidMapping(lid, pn) {
+  function upsertLidMapping(lid, pn, mirrorRemote = true) {
     const mapping = normalizeMapping(lid, pn);
     if (!mapping) return false;
     upsertMappingStmt.run(mapping.lid, mapping.pn, Date.now());
+    if (mirrorRemote) mirrorState('jid_mapping', mapping.lid, mapping);
     return true;
   }
 
@@ -317,4 +354,41 @@ export function createPersistentStore(dbPath) {
     stats,
     close
   };
+}
+
+
+export async function hydratePersistentStoreFromSupabase(store) {
+  if (!isSupabaseEnabled() || !store) return { enabled: false, chats: 0, contacts: 0, messages: 0, mappings: 0 };
+
+  const [chatRows, contactRows, messageRows, mappingRows] = await Promise.all([
+    listSupabaseState('chat', 1000),
+    listSupabaseState('contact', 5000),
+    listSupabaseState('message', 5000),
+    listSupabaseState('jid_mapping', 5000)
+  ]);
+
+  for (const row of [...chatRows].reverse()) {
+    if (row?.value) store.upsertChat(row.value, false);
+  }
+  for (const row of [...contactRows].reverse()) {
+    if (row?.value) store.upsertContact(row.value, false);
+  }
+  for (const row of [...messageRows].reverse()) {
+    const value = row?.value;
+    if (value?.serialized) store.upsertMessage(value.serialized, value.rawMessage || null, false);
+  }
+  for (const row of [...mappingRows].reverse()) {
+    const value = row?.value;
+    if (value?.lid && value?.pn) store.upsertLidMapping(value.lid, value.pn, false);
+  }
+
+  const result = {
+    enabled: true,
+    chats: chatRows.length,
+    contacts: contactRows.length,
+    messages: messageRows.length,
+    mappings: mappingRows.length
+  };
+  console.log('[Supabase] Hydrated persistent WhatsApp cache:', result);
+  return result;
 }
