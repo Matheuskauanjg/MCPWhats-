@@ -1,9 +1,9 @@
 {
-  "name": "whatsapp-personal-render",
-  "version": "2.3.0",
+  "name": "mcpwhats",
+  "version": "3.0.0",
   "private": true,
   "type": "module",
-  "description": "Personal WhatsApp bridge using Baileys with MCP support for ChatGPT plugins",
+  "description": "WhatsApp personal bridge with MCP/OAuth for ChatGPT, Supabase persistence and multi-provider AI",
   "main": "src/gateway-entry.js",
   "scripts": {
     "start": "node src/gateway-entry.js"
