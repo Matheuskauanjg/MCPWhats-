@@ -1,5 +1,5 @@
 -- MCPWhats - Supabase setup
--- Execute once in a dedicated Supabase project, or review before applying to a shared project.
+-- Execute ONLY in the dedicated MCPWhats Supabase project. Do not apply this schema to Giro or any other existing project.
 
 create extension if not exists pg_cron with schema pg_catalog;
 create extension if not exists pg_net with schema extensions;
@@ -55,10 +55,11 @@ begin
   end if;
 end $$;
 
--- Replace this placeholder once with your actual Supabase project URL.
+-- Replace this placeholder only after the dedicated MCPWhats Supabase project exists.
 -- select vault.create_secret('https://SEU-PROJETO.supabase.co', 'mcpwhats_project_url');
 
--- After deploying the mcpwhats-keepalive Edge Function, schedule it:
+-- After deploying the mcpwhats-keepalive Edge Function in the dedicated project, schedule it.
+-- This cron is the ONLY intended keepalive source for the Render service:
 -- select cron.schedule(
 --   'mcpwhats-render-keepalive',
 --   '*/5 * * * *',
