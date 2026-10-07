@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { isSupabaseEnabled, setState as setSupabaseState, listState as listSupabaseState } from './supabase-sync.js';
+import { isPersistenceEnabled, persistenceBackend, setState as setRemoteState, listState as listRemoteState } from './supabase-sync.js';
 
 function safeJson(value) {
   try {
@@ -30,9 +30,9 @@ function normalizeMapping(lid, pn) {
 
 export function createPersistentStore(dbPath) {
   function mirrorState(namespace, key, value) {
-    if (!isSupabaseEnabled()) return;
-    void setSupabaseState(namespace, key, value).catch(error => {
-      console.warn(`[Supabase] Mirror ${namespace}/${key} failed:`, error?.message || error);
+    if (!isPersistenceEnabled()) return;
+    void setRemoteState(namespace, key, value).catch(error => {
+      console.warn(`[Persistence] Mirror ${namespace}/${key} failed:`, error?.message || error);
     });
   }
 
@@ -358,13 +358,13 @@ export function createPersistentStore(dbPath) {
 
 
 export async function hydratePersistentStoreFromSupabase(store) {
-  if (!isSupabaseEnabled() || !store) return { enabled: false, chats: 0, contacts: 0, messages: 0, mappings: 0 };
+  if (!isPersistenceEnabled() || !store) return { enabled: false, chats: 0, contacts: 0, messages: 0, mappings: 0 };
 
   const [chatRows, contactRows, messageRows, mappingRows] = await Promise.all([
-    listSupabaseState('chat', 1000),
-    listSupabaseState('contact', 5000),
-    listSupabaseState('message', 5000),
-    listSupabaseState('jid_mapping', 5000)
+    listRemoteState('chat', 1000),
+    listRemoteState('contact', 5000),
+    listRemoteState('message', 5000),
+    listRemoteState('jid_mapping', 5000)
   ]);
 
   for (const row of [...chatRows].reverse()) {
@@ -389,6 +389,6 @@ export async function hydratePersistentStoreFromSupabase(store) {
     messages: messageRows.length,
     mappings: mappingRows.length
   };
-  console.log('[Supabase] Hydrated persistent WhatsApp cache:', result);
+  console.log(`[Persistence] Hydrated persistent WhatsApp cache from ${persistenceBackend()}:`, result);
   return result;
 }
