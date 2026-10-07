@@ -146,7 +146,7 @@ export function startPublicMcpProxy({ publicPort, targetPort }) {
         token_endpoint_auth_methods_supported: ['none'],
         authorization_response_iss_parameter_supported: true,
         client_id_metadata_document_supported: true,
-        scopes_supported: ['whatsapp.read', 'whatsapp.send']
+        scopes_supported: ['whatsapp.read', 'whatsapp.send', 'whatsapp.manage']
       }));
       console.log('[OAuth-PROXY] authorization metadata -> CIMD enabled');
       return;
