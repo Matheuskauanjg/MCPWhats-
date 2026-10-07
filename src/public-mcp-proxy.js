@@ -2,7 +2,7 @@ import http from 'node:http';
 import zlib from 'node:zlib';
 
 const MAX_BODY_BYTES = 20 * 1024 * 1024;
-const INTERNAL_CLIENT_ID = 'chatgpt-meu-whatsapp';
+const INTERNAL_CLIENT_ID = 'chatgpt-mcpwhats';
 
 function tryJson(text) {
   try { return JSON.parse(text); } catch { return null; }
