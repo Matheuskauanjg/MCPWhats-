@@ -1,0 +1,27 @@
+name: MCPWhats CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Validate JavaScript syntax
+        run: |
+          node --check src/gateway-entry.js
+          node --check src/server-media-v2.js
+          node --check src/persistent-store.js
+          node --check src/supabase-sync.js
+          node --check src/runtime-config.js
+          node --check src/auto-reply-service.js
+          node --check src/mcp-gateway-v5.js
+          node --check src/public-mcp-proxy.js
+      - name: Validate package install
+        run: npm install --ignore-scripts --no-audit --no-fund
