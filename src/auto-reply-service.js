@@ -1,11 +1,14 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { whatsappEvents } from './whatsapp-events.js';
+import { getRuntimeConfig, runtimeConfigStatus } from './runtime-config.js';
 
 const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
+const NVIDIA_CHAT_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
 const DEFAULT_REPLY_MODEL = 'openai/gpt-oss-20b';
 const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash-lite';
+const DEFAULT_NVIDIA_MODEL = 'openai/gpt-oss-20b';
 const CONTROL_TIME_ZONE = 'America/Sao_Paulo';
 
 function clampNumber(value, fallback, min, max) {
@@ -265,13 +268,16 @@ export function startAutoReplyService({ bridgePort, audioPort }) {
   const API_TOKEN = String(process.env.API_TOKEN || '').trim();
   const GROQ_API_KEY = String(process.env.GROQ_API_KEY || '').trim();
   const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || '').trim();
+  const NVIDIA_API_KEY = String(process.env.NVIDIA_API_KEY || '').trim();
   const CONTROL_INPUT = String(process.env.AUTO_REPLY_CONTROL_JID || process.env.AUTO_REPLY_CONTROL_NUMBER || '').trim();
   const CONTROL_JID = normalizeControlJid(CONTROL_INPUT);
   const REPLY_MODEL = String(process.env.GROQ_REPLY_MODEL || DEFAULT_REPLY_MODEL).trim() || DEFAULT_REPLY_MODEL;
   const GEMINI_REPLY_MODEL = String(process.env.GEMINI_REPLY_MODEL || DEFAULT_GEMINI_MODEL).trim() || DEFAULT_GEMINI_MODEL;
+  const NVIDIA_REPLY_MODEL = String(process.env.NVIDIA_REPLY_MODEL || DEFAULT_NVIDIA_MODEL).trim() || DEFAULT_NVIDIA_MODEL;
   const REPLY_MAX_TOKENS = Math.round(clampNumber(process.env.GROQ_REPLY_MAX_TOKENS, 1024, 256, 4096));
   const GROQ_TIMEOUT_MS = Math.round(clampNumber(process.env.GROQ_REPLY_TIMEOUT_MS, 2500, 500, 15000));
   const GEMINI_TIMEOUT_MS = Math.round(clampNumber(process.env.GEMINI_REPLY_TIMEOUT_MS, 6000, 1000, 20000));
+  const NVIDIA_TIMEOUT_MS = Math.round(clampNumber(process.env.NVIDIA_REPLY_TIMEOUT_MS, 8000, 1000, 30000));
   const PREFIX = String(process.env.AUTO_REPLY_PREFIX ?? '').slice(0, 30);
   const EXTRA_STYLE = String(process.env.AUTO_REPLY_STYLE || '').trim().slice(0, 3000);
   const DELAY_MIN_MS = clampNumber(process.env.AUTO_REPLY_DELAY_MIN_MS, 250, 0, 10000);
@@ -364,7 +370,9 @@ export function startAutoReplyService({ bridgePort, audioPort }) {
 
   function getRuntimeInstructions() {
     const sections = [];
-    if (EXTRA_STYLE) sections.push(`ESTILO FIXO:\n${EXTRA_STYLE}`);
+    const runtime = getRuntimeConfig();
+    const personality = String(runtime.personality || EXTRA_STYLE || '').trim();
+    if (personality) sections.push(`PERSONALIDADE/ESTILO FIXO:\n${personality}`);
     const activeOrders = state.orders.filter(item => !item?.expiresAt || Number(item.expiresAt) > Date.now());
     if (activeOrders.length) sections.push(`ORDENS ATUAIS DO MATHEUS (devem ser seguidas enquanto existirem):\n${activeOrders.map((item, i) => `${i + 1}. ${item.text}`).join('\n')}`);
     if (state.notes.length) sections.push(`RECADOS/CONTEXTO DEIXADOS PELO MATHEUS:\n${state.notes.slice(-20).map((item, i) => `${i + 1}. ${item.text}`).join('\n')}`);
@@ -604,38 +612,124 @@ export function startAutoReplyService({ bridgePort, audioPort }) {
 
   async function createGroqReply(history, systemPrompt) {
     if (!GROQ_API_KEY) throw new Error('GROQ_API_KEY is not configured');
+    const cfg = getRuntimeConfig();
+    const model = String(cfg.groqModel || REPLY_MODEL || DEFAULT_REPLY_MODEL);
+    const temperature = Number.isFinite(Number(cfg.temperature)) ? Number(cfg.temperature) : 0.82;
     const started = performance.now();
-    const isGptOss = REPLY_MODEL.startsWith('openai/gpt-oss-');
-    const payload = await fetchJsonWithTimeout(GROQ_CHAT_URL, { method: 'POST', headers: { authorization: `Bearer ${GROQ_API_KEY}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: REPLY_MODEL, messages: [{ role: 'system', content: systemPrompt }, ...history], temperature: 0.82, max_completion_tokens: REPLY_MAX_TOKENS, ...(isGptOss ? { reasoning_effort: 'low', include_reasoning: false } : {}) }) }, GROQ_TIMEOUT_MS, 'Groq');
+    const isGptOss = model.startsWith('openai/gpt-oss-');
+    const payload = await fetchJsonWithTimeout(GROQ_CHAT_URL, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${GROQ_API_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'system', content: systemPrompt }, ...history],
+        temperature,
+        max_completion_tokens: REPLY_MAX_TOKENS,
+        ...(isGptOss ? { reasoning_effort: 'low', include_reasoning: false } : {})
+      })
+    }, GROQ_TIMEOUT_MS, 'Groq');
     const reply = cleanReply(payload?.choices?.[0]?.message?.content);
     const finishReason = payload?.choices?.[0]?.finish_reason || 'unknown';
-    console.log(`[AutoReply] Groq latency=${Math.round(performance.now() - started)}ms finish=${finishReason} chars=${reply.length} maxTokens=${REPLY_MAX_TOKENS}`);
+    console.log(`[AutoReply] Groq latency=${Math.round(performance.now() - started)}ms model=${model} finish=${finishReason} chars=${reply.length}`);
     if (!reply) throw new Error(`Groq returned empty reply (finish=${finishReason})`);
     return reply;
   }
 
   async function createGeminiReply(history, systemPrompt) {
     if (!GEMINI_API_KEY) throw new Error('GEMINI_API_KEY is not configured');
+    const cfg = getRuntimeConfig();
+    const model = String(cfg.geminiModel || GEMINI_REPLY_MODEL || DEFAULT_GEMINI_MODEL);
+    const temperature = Number.isFinite(Number(cfg.temperature)) ? Number(cfg.temperature) : 0.82;
     const started = performance.now();
     const contents = history.map(item => ({ role: item.role === 'assistant' ? 'model' : 'user', parts: [{ text: item.content }] }));
-    const url = `${GEMINI_API_BASE}/${encodeURIComponent(GEMINI_REPLY_MODEL)}:generateContent`;
-    const payload = await fetchJsonWithTimeout(url, { method: 'POST', headers: { 'x-goog-api-key': GEMINI_API_KEY, 'content-type': 'application/json' }, body: JSON.stringify({ systemInstruction: { parts: [{ text: systemPrompt }] }, contents, generationConfig: { maxOutputTokens: 512 } }) }, GEMINI_TIMEOUT_MS, 'Gemini');
+    const url = `${GEMINI_API_BASE}/${encodeURIComponent(model)}:generateContent`;
+    const payload = await fetchJsonWithTimeout(url, {
+      method: 'POST',
+      headers: { 'x-goog-api-key': GEMINI_API_KEY, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        contents,
+        generationConfig: { maxOutputTokens: 512, temperature }
+      })
+    }, GEMINI_TIMEOUT_MS, 'Gemini');
     const parts = payload?.candidates?.[0]?.content?.parts || [];
     const reply = cleanReply(parts.map(part => String(part?.text || '')).filter(Boolean).join('\n'));
     const finishReason = payload?.candidates?.[0]?.finishReason || 'unknown';
-    console.log(`[AutoReply] Gemini latency=${Math.round(performance.now() - started)}ms model=${GEMINI_REPLY_MODEL} finish=${finishReason} chars=${reply.length}`);
+    console.log(`[AutoReply] Gemini latency=${Math.round(performance.now() - started)}ms model=${model} finish=${finishReason} chars=${reply.length}`);
     if (!reply) throw new Error(`Gemini returned empty reply (finish=${finishReason})`);
     return reply;
   }
 
+  async function createNvidiaReply(history, systemPrompt) {
+    if (!NVIDIA_API_KEY) throw new Error('NVIDIA_API_KEY is not configured');
+    const cfg = getRuntimeConfig();
+    const model = String(cfg.nvidiaModel || NVIDIA_REPLY_MODEL || DEFAULT_NVIDIA_MODEL);
+    const temperature = Number.isFinite(Number(cfg.temperature)) ? Number(cfg.temperature) : 0.82;
+    const started = performance.now();
+    const payload = await fetchJsonWithTimeout(NVIDIA_CHAT_URL, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${NVIDIA_API_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'system', content: systemPrompt }, ...history],
+        temperature,
+        max_tokens: REPLY_MAX_TOKENS,
+        stream: false
+      })
+    }, NVIDIA_TIMEOUT_MS, 'NVIDIA');
+    const reply = cleanReply(payload?.choices?.[0]?.message?.content);
+    const finishReason = payload?.choices?.[0]?.finish_reason || 'unknown';
+    console.log(`[AutoReply] NVIDIA latency=${Math.round(performance.now() - started)}ms model=${model} finish=${finishReason} chars=${reply.length}`);
+    if (!reply) throw new Error(`NVIDIA returned empty reply (finish=${finishReason})`);
+    return reply;
+  }
+
   async function createReply(messages, currentText, chat) {
-    const history = messages.slice(-28).flatMap(message => { const text = String(message?.text || '').trim(); return text ? [{ role: message.fromMe ? 'assistant' : 'user', content: text.slice(0, 900) }] : []; });
+    const history = messages.slice(-28).flatMap(message => {
+      const text = String(message?.text || '').trim();
+      return text ? [{ role: message.fromMe ? 'assistant' : 'user', content: text.slice(0, 900) }] : [];
+    });
     if (!history.length || history.at(-1)?.role !== 'user') history.push({ role: 'user', content: currentText });
+
     const contactName = String(chat?.name || chat?.pushName || '').trim().slice(0, 120);
     const systemPrompt = buildMatheusStylePrompt(contactName, getRuntimeInstructions());
-    try { return await createGroqReply(history, systemPrompt); }
-    catch (error) { console.warn(`[AutoReply] Groq fallback -> Gemini: ${shortError(error)}`); if (!GEMINI_API_KEY) throw error; }
-    return createGeminiReply(history, systemPrompt);
+    const cfg = getRuntimeConfig();
+    const selected = String(cfg.aiProvider || 'auto').toLowerCase();
+
+    const orderByProvider = {
+      auto: ['groq', 'nvidia', 'gemini'],
+      groq: ['groq', 'nvidia', 'gemini'],
+      nvidia: ['nvidia', 'gemini', 'groq'],
+      gemini: ['gemini', 'nvidia', 'groq']
+    };
+    const order = orderByProvider[selected] || orderByProvider.auto;
+    const available = {
+      groq: Boolean(GROQ_API_KEY),
+      gemini: Boolean(GEMINI_API_KEY),
+      nvidia: Boolean(NVIDIA_API_KEY)
+    };
+    const runners = {
+      groq: () => createGroqReply(history, systemPrompt),
+      gemini: () => createGeminiReply(history, systemPrompt),
+      nvidia: () => createNvidiaReply(history, systemPrompt)
+    };
+
+    const errors = [];
+    for (const provider of order) {
+      if (!available[provider]) continue;
+      try {
+        return await runners[provider]();
+      } catch (error) {
+        const message = shortError(error);
+        errors.push(`${provider}: ${message}`);
+        console.warn(`[AutoReply] provider ${provider} failed: ${message}`);
+      }
+    }
+
+    if (!Object.values(available).some(Boolean)) {
+      throw new Error('No AI API configured. Add GROQ_API_KEY, GEMINI_API_KEY or NVIDIA_API_KEY.');
+    }
+    throw new Error(`All configured AI providers failed: ${errors.join(' | ')}`);
   }
 
   function rememberProcessed(messages) {
@@ -703,7 +797,8 @@ export function startAutoReplyService({ bridgePort, audioPort }) {
   void (async () => {
     await loadState(); initialized = true;
     if (!CONTROL_JID) console.warn('[AutoReply] Configure AUTO_REPLY_CONTROL_JID (preferred) or AUTO_REPLY_CONTROL_NUMBER; automatic mode cannot be controlled until then.');
-    console.log(`[AutoReply] state=${state.enabled ? 'ON' : 'OFF'} model=${REPLY_MODEL} fallback=${GEMINI_API_KEY ? GEMINI_REPLY_MODEL : 'disabled'} control=${CONTROL_JID ? 'configured' : 'missing'} orders=${state.orders.length} notes=${state.notes.length} watchers=${state.watchers.filter(item => item.active).length} scheduled=${state.scheduled.filter(job => job.status === 'pending').length} eventDriven=true concurrency=${CONCURRENCY} debounce=${DEBOUNCE_MS}ms delay=${DELAY_MIN_MS}-${DELAY_MAX_MS}ms maxTokens=${REPLY_MAX_TOKENS} groqTimeout=${GROQ_TIMEOUT_MS}ms`);
+    const aiStatus = runtimeConfigStatus();
+    console.log(`[AutoReply] state=${state.enabled ? 'ON' : 'OFF'} provider=${aiStatus.aiProvider} groq=${aiStatus.keys.groq ? aiStatus.groqModel : 'off'} nvidia=${aiStatus.keys.nvidia ? aiStatus.nvidiaModel : 'off'} gemini=${aiStatus.keys.gemini ? aiStatus.geminiModel : 'off'} control=${CONTROL_JID ? 'configured' : 'missing'} orders=${state.orders.length} notes=${state.notes.length} watchers=${state.watchers.filter(item => item.active).length} scheduled=${state.scheduled.filter(job => job.status === 'pending').length} eventDriven=true concurrency=${CONCURRENCY} debounce=${DEBOUNCE_MS}ms delay=${DELAY_MIN_MS}-${DELAY_MAX_MS}ms`);
     await checkControlFallback(); await runScheduledMessages();
     controlFallbackTimer = setInterval(() => void checkControlFallback(), CONTROL_FALLBACK_MS); controlFallbackTimer.unref?.();
     scheduleTimer = setInterval(() => void runScheduledMessages(), SCHEDULE_CHECK_MS); scheduleTimer.unref?.();
@@ -711,6 +806,6 @@ export function startAutoReplyService({ bridgePort, audioPort }) {
 
   return {
     stop() { stopped = true; whatsappEvents.off('message', onMessageEvent); if (controlFallbackTimer) clearInterval(controlFallbackTimer); if (scheduleTimer) clearInterval(scheduleTimer); for (const timer of debounceTimers.values()) clearTimeout(timer); debounceTimers.clear(); pendingChats.clear(); },
-    getState() { return { ...state, controlIdConfigured: Boolean(CONTROL_JID), model: REPLY_MODEL, fallbackModel: GEMINI_API_KEY ? GEMINI_REPLY_MODEL : null, groqTimeoutMs: GROQ_TIMEOUT_MS, eventDriven: true, concurrency: CONCURRENCY, debounceMs: DEBOUNCE_MS, delayMinMs: DELAY_MIN_MS, delayMaxMs: DELAY_MAX_MS }; }
+    getState() { return { ...state, controlIdConfigured: Boolean(CONTROL_JID), ai: runtimeConfigStatus(), groqTimeoutMs: GROQ_TIMEOUT_MS, geminiTimeoutMs: GEMINI_TIMEOUT_MS, nvidiaTimeoutMs: NVIDIA_TIMEOUT_MS, eventDriven: true, concurrency: CONCURRENCY, debounceMs: DEBOUNCE_MS, delayMinMs: DELAY_MIN_MS, delayMaxMs: DELAY_MAX_MS }; }
   };
 }
