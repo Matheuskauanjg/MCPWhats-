@@ -502,9 +502,13 @@ app.get('/health', (_req, res) => {
 });
 
 app.get('/qr', (req, res) => {
-  if (QR_SECRET && req.query.key !== QR_SECRET) return res.status(401).type('html').send('<h1>401 - chave do QR inválida</h1>');
-
-  const keySuffix = req.query.key ? `?key=${encodeURIComponent(String(req.query.key))}` : '';
+  // Reading the QR page is intentionally public so the canonical /qr URL works.
+  // Mutating actions (pairing-code and session reset) remain protected by QR_SECRET.
+  const suppliedKey = String(req.query.key || '');
+  const hasQrAdminAccess = !QR_SECRET || suppliedKey === QR_SECRET;
+  const keySuffix = hasQrAdminAccess && suppliedKey
+    ? `?key=${encodeURIComponent(suppliedKey)}`
+    : '';
   const pairingInfo = latestPairingCode
     ? `<div class="pairing-result"><div class="pairing-label">Código para inserir no WhatsApp</div><div class="pairing-code">${latestPairingCode}</div><p>Abra o WhatsApp no celular → Dispositivos conectados → Conectar dispositivo → <strong>Conectar com número de telefone</strong> e digite este código.</p>${latestPairingPhoneLast4 ? `<p class="muted">Número final: ••••${latestPairingPhoneLast4}</p>` : ''}</div>`
     : '';
@@ -552,9 +556,9 @@ app.get('/qr', (req, res) => {
 </head>
 <body>
 <main class="page">
-  <div class="hero"><h1>Conectar WhatsApp</h1><p>Escolha QR Code ou código pelo número de telefone.</p></div>
+  <div class="hero"><h1>Conectar WhatsApp</h1><p>Escaneie o QR Code abaixo. Ações administrativas, como gerar código pelo telefone ou resetar a sessão, continuam protegidas.</p></div>
   <div class="card">${content}<div class="state">Estado: <strong>${whatsappState}</strong>${lastError ? `<br><span class="error">${String(lastError).replace(/[<>&]/g, '')}</span>` : ''}</div></div>
-  ${whatsappState !== 'ready' ? `<form class="reset" method="post" action="/qr/reset${keySuffix}"><button type="submit">Gerar nova sessão</button></form>` : ''}
+  ${whatsappState !== 'ready' && hasQrAdminAccess ? `<form class="reset" method="post" action="/qr/reset${keySuffix}"><button type="submit">Gerar nova sessão</button></form>` : ''}
 </main>
 <script>
 (() => {
