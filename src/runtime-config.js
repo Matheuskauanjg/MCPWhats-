@@ -1,4 +1,4 @@
-import { getSetting, setSetting, isSupabaseEnabled } from './supabase-sync.js';
+import { getSetting, setSetting, isPersistenceEnabled, persistenceBackend, isSupabaseEnabled, isPostgresEnabled } from './supabase-sync.js';
 
 const defaults = Object.freeze({
   aiProvider: String(process.env.AI_PROVIDER || 'auto').trim().toLowerCase() || 'auto',
@@ -38,13 +38,13 @@ function sanitize(input = {}) {
 export async function loadRuntimeConfig() {
   if (loaded) return { ...current };
   loaded = true;
-  if (isSupabaseEnabled()) {
+  if (isPersistenceEnabled()) {
     try {
       const remote = await getSetting('runtime_config');
       if (remote && typeof remote === 'object') current = { ...current, ...sanitize(remote) };
-      console.log('[RuntimeConfig] Loaded from Supabase.');
+      console.log(`[RuntimeConfig] Loaded from ${persistenceBackend()}.`);
     } catch (error) {
-      console.warn('[RuntimeConfig] Supabase load failed:', error?.message || error);
+      console.warn('[RuntimeConfig] remote load failed:', error?.message || error);
     }
   }
   return { ...current };
@@ -57,16 +57,18 @@ export function getRuntimeConfig() {
 export async function updateRuntimeConfig(patch) {
   const safe = sanitize(patch);
   current = { ...current, ...safe };
-  if (isSupabaseEnabled()) {
+  if (isPersistenceEnabled()) {
     await setSetting('runtime_config', current);
   }
-  return { ...current, persisted: isSupabaseEnabled() };
+  return { ...current, persisted: isPersistenceEnabled(), backend: persistenceBackend() };
 }
 
 export function runtimeConfigStatus() {
   return {
     ...current,
+    persistenceBackend: persistenceBackend(),
     supabaseEnabled: isSupabaseEnabled(),
+    postgresEnabled: isPostgresEnabled(),
     keys: {
       groq: Boolean(process.env.GROQ_API_KEY),
       gemini: Boolean(process.env.GEMINI_API_KEY),
