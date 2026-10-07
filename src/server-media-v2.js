@@ -12,7 +12,7 @@ import makeWASocket, {
   getContentType,
   useMultiFileAuthState
 } from '@whiskeysockets/baileys';
-import { createPersistentStore } from './persistent-store.js';
+import { createPersistentStore, hydratePersistentStoreFromSupabase } from './persistent-store.js';
 import { whatsappEvents } from './whatsapp-events.js';
 
 const app = express();
@@ -51,6 +51,11 @@ const chats = new Map();
 const contacts = new Map();
 const messagesByChat = new Map();
 const persistentStore = createPersistentStore(DB_PATH);
+try {
+  await hydratePersistentStoreFromSupabase(persistentStore);
+} catch (error) {
+  console.warn('[Supabase] WhatsApp history hydrate failed:', error?.message || error);
+}
 
 function requireApiToken(req, res, next) {
   if (!API_TOKEN) return res.status(503).json({ error: 'API_TOKEN is not configured' });
