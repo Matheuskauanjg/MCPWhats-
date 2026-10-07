@@ -1,250 +1,123 @@
 # Arquitetura do MCPWhats
 
-## Objetivo
-
-O MCPWhats conecta um WhatsApp pessoal ao ChatGPT usando MCP + OAuth e também pode executar respostas automáticas com provedores externos de IA.
-
-O projeto é isolado dos serviços anteriores.
-
-## Arquitetura final desejada
+## Visão geral
 
 ```text
-                         ┌─────────────────────────────┐
-                         │       Supabase MCPWhats     │
-                         │   projeto EXCLUSIVO novo    │
-                         │                             │
-                         │  pg_cron ──► Edge Function │
-                         │      │          │            │
-                         │      │          └────────────┼────► GET /health
-                         │      │                       │
-                         │  settings/state/health      │
-                         └─────────────┬───────────────┘
-                                       │
-                                       │ persistência
-                                       ▼
-┌──────────┐      ┌────────────────────────────────────────────┐
-│ WhatsApp │◄────►│ Render: mcpwhats-personal                 │
-└──────────┘      │                                            │
-                  │ Baileys / REST interno          :10001     │
-                  │ Audio proxy                     :10003     │
-                  │ MCP/OAuth interno               :10002     │
-                  │ Proxy público / Render PORT     :10000     │
-                  │                                            │
-                  │ /health  /qr  /mcp  /api/*                 │
-                  └──────────────┬─────────────────────────────┘
+                         Supabase compartilhado
+                  ┌─────────────────────────────────┐
+                  │ mcpwhats_settings               │
+                  │ mcpwhats_state                  │
+                  │ mcpwhats_health                 │
+                  │                                 │
+                  │ mcpwhats-storage                │
+                  │ mcpwhats-keepalive              │
+                  │ pg_cron / pg_net                │
+                  └──────────────┬──────────────────┘
                                  │
-                                 │ fallback de persistência
+                      persistência + keepalive
+                                 │
                                  ▼
-                  ┌────────────────────────────────────────────┐
-                  │ Render Postgres: mcpwhats-db              │
-                  │ recurso EXCLUSIVO                         │
-                  └────────────────────────────────────────────┘
+ChatGPT ── MCP/OAuth ──► Render: mcpwhats-personal ◄──► WhatsApp/Baileys
+                                 │
+                                 ├── SQLite /tmp (cache)
+                                 └── Render Postgres (fallback)
 ```
 
-## Responsabilidade de cada componente
+## Supabase compartilhado
 
-### GitHub
+O MCPWhats **não precisa de um projeto Supabase próprio**.
 
-O GitHub é a fonte do código.
+Ele compartilha o projeto existente, mas seus dados ficam isolados por nomes e autenticação:
 
-Ele contém:
+- tabelas `mcpwhats_*`;
+- Edge Functions `mcpwhats-*`;
+- segredo de sync exclusivo;
+- segredo de keepalive exclusivo;
+- RLS ativado;
+- `anon` e `authenticated` sem acesso às tabelas do MCPWhats.
 
-- bridge WhatsApp;
-- MCP/OAuth;
-- proxy público;
-- auto reply;
-- camada de persistência;
-- schema Supabase;
-- Edge Function;
-- schema do Render Postgres;
-- `render.yaml`;
-- CI;
-- documentação.
+Outros schemas/tabelas do projeto não devem ser modificados por manutenção do MCPWhats.
 
-O GitHub **não é o keepalive**.
+## Storage proxy
 
-### Render Web Service
-
-O Render executa o processo Node.js continuamente enquanto a instância estiver ativa.
-
-Serviço:
+O Render usa:
 
 ```text
-mcpwhats-personal
+SUPABASE_URL + MCPWHATS_SYNC_SECRET
 ```
 
-URL:
+e chama:
 
 ```text
-https://mcpwhats-personal.onrender.com
+/functions/v1/mcpwhats-storage
 ```
 
-### Portas
+A função compara o hash SHA-256 do segredo recebido com `sync_secret_sha256`.
 
-| Porta | Uso |
-|---|---|
-| `10000` | Proxy HTTP público ligado ao `PORT` do Render |
-| `10001` | Bridge WhatsApp/Baileys e REST interno |
-| `10002` | MCP/OAuth interno |
-| `10003` | Proxy de áudio/transcrição |
+Operações permitidas:
 
-Somente a porta pública do Render deve ser exposta externamente.
+- get_setting
+- set_setting
+- get_state
+- set_state
+- list_state
 
-## Fluxo MCP
+Ela não expõe SQL arbitrário nem acesso genérico às outras tabelas.
+
+## Baileys
+
+A sessão continua fisicamente em `/tmp/baileys_auth` durante a execução, mas os arquivos são serializados em base64 e espelhados para:
 
 ```text
-ChatGPT
-   │
-   │ HTTPS + OAuth
-   ▼
-https://mcpwhats-personal.onrender.com/mcp
-   │
-   ▼
-public-mcp-proxy.js
-   │
-   ▼
-mcp-gateway-v5.js
-   │
-   ▼
-Bridge WhatsApp
-   │
-   ▼
-Baileys
-   │
-   ▼
-WhatsApp
+mcpwhats_state
+namespace = baileys_auth
 ```
 
-## OAuth
+Na inicialização, esses arquivos são restaurados antes de abrir o socket Baileys.
 
-O cliente interno dedicado usa:
+## Histórico
 
-```text
-chatgpt-mcpwhats
-```
+SQLite continua sendo cache rápido local.
 
-Callback esperado:
-
-```text
-https://chatgpt.com/connector_platform_oauth_redirect
-```
-
-Escopos:
-
-- `whatsapp.read`;
-- `whatsapp.send`;
-- `whatsapp.manage`.
-
-`MCP_LOGIN_SECRET` protege a autorização do conector.
-
-## Persistência
-
-Existem três níveis possíveis.
-
-### 1. Supabase
-
-É o backend persistente preferido quando o projeto exclusivo existir.
-
-Pode armazenar:
-
-- sessão do Baileys;
-- configurações;
-- personalidade;
-- estado do auto reply;
-- chats;
-- contatos;
-- mensagens/metadados;
-- mapeamentos de JID;
-- histórico do keepalive.
-
-### 2. Render Postgres
-
-É o fallback persistente independente.
-
-O código usa a tabela:
-
-```text
-mcpwhats_kv
-```
-
-O schema está em:
-
-```text
-render-postgres/setup.sql
-```
-
-Quando `DATABASE_URL` está configurado e o Supabase não está configurado, essa persistência pode assumir o armazenamento remoto.
-
-### 3. SQLite local
-
-O arquivo local continua sendo utilizado como cache de alta velocidade:
-
-```text
-/tmp/whatsapp.sqlite
-```
-
-No Render Free, `/tmp` é efêmero e nunca deve ser considerado a única fonte permanente.
-
-## Prioridade do backend
-
-A camada `src/supabase-sync.js` seleciona o backend nesta ordem:
-
-```text
-1. Supabase configurado
-2. DATABASE_URL / PostgreSQL
-3. somente arquivos/SQLite locais
-```
-
-O nome histórico do arquivo `supabase-sync.js` foi mantido, mas hoje ele também contém o fallback PostgreSQL.
+Chats, contatos, mensagens e mapeamentos são espelhados para `mcpwhats_state` e reidratados no startup.
 
 ## Keepalive
 
-O keepalive pertence ao Supabase.
-
-Fluxo:
-
 ```text
-pg_cron
-  │
-  ▼
-net.http_post
-  │
-  ▼
-Supabase Edge Function
-  │
-  ▼
-GET /health?source=supabase-keepalive
-  │
-  ▼
-Render
+pg_cron (5 min)
+    ↓
+pg_net
+    ↓
+mcpwhats-keepalive
+    ↓
+Render /health
+    ↓
+mcpwhats_health
 ```
 
-A Edge Function registra o resultado em `mcpwhats_health`.
+O GitHub Actions não participa desse fluxo.
 
-## Auto Reply e IA
+## OAuth
 
-Provedores suportados:
+```text
+MCP:      https://mcpwhats-personal.onrender.com/mcp
+Client:   chatgpt-mcpwhats
+Callback: https://chatgpt.com/connector_platform_oauth_redirect
+Scopes:   whatsapp.read whatsapp.send whatsapp.manage
+```
 
-- Groq;
-- NVIDIA NIM;
-- Gemini.
+## Fallbacks
 
-No modo `auto`, somente provedores com chave configurada são tentados.
+Persistência:
 
-A personalidade e os modelos podem ser alterados pelo MCP sem gravar chaves de API no banco.
+```text
+Supabase direto
+  ↓
+Supabase proxy  ← produção atual
+  ↓
+Render/Postgres
+  ↓
+local-only
+```
 
-## Segurança
-
-Nunca colocar no GitHub:
-
-- `API_TOKEN`;
-- `MCP_LOGIN_SECRET`;
-- `QR_SECRET`;
-- `SUPABASE_SECRET_KEY`;
-- `SUPABASE_SERVICE_ROLE_KEY`;
-- `GROQ_API_KEY`;
-- `GEMINI_API_KEY`;
-- `NVIDIA_API_KEY`;
-- `DATABASE_URL` com senha.
-
-O repositório deve conter apenas placeholders e código reproduzível.
+O Render Postgres `mcpwhats-db` permanece disponível como fallback.

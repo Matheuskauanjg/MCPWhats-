@@ -1,133 +1,59 @@
 # Supabase Keepalive do Render
 
-## Regra
+## Estado
 
-**O Supabase é o responsável pelo ping do Render.**
+**Ativo e testado em 07/10/2026.**
 
-Não usar GitHub Actions, UptimeRobot ou outro serviço como keepalive principal desta instalação.
+O keepalive roda no mesmo Supabase compartilhado usado pela infraestrutura existente.
+
+Não há GitHub Actions de keepalive.
 
 ## Fluxo
 
 ```text
-Supabase Cron (pg_cron)
-        │
-        │ a cada 5 minutos
-        ▼
-pg_net / net.http_post
-        │
-        ▼
-Edge Function: mcpwhats-keepalive
-        │
-        │ valida x-mcpwhats-ping-secret
-        ▼
-GET https://mcpwhats-personal.onrender.com/health?source=supabase-keepalive
-        │
-        ▼
-Render responde /health
-        │
-        ▼
-Edge Function registra resultado em mcpwhats_health
-```
-
-## Estado em 07/10/2026
-
-A implementação está pronta no GitHub, porém **não está ativa** porque o Supabase recusou a criação de um projeto Free adicional por limite da conta.
-
-Não foi reutilizado nenhum projeto Supabase existente.
-
-## Arquivos
-
-```text
-supabase/setup.sql
-supabase/functions/mcpwhats-keepalive/index.ts
-supabase/functions/mcpwhats-keepalive/deno.json
-```
-
-## 1. Criar um projeto Supabase exclusivo
-
-Nome recomendado:
-
-```text
-MCPWhats
-```
-
-Região:
-
-```text
-sa-east-1
-```
-
-Não instalar o schema em um projeto de outro sistema.
-
-## 2. Executar o setup
-
-Execute:
-
-```text
-supabase/setup.sql
-```
-
-Ele prepara:
-
-- `pg_cron`;
-- `pg_net`;
-- `mcpwhats_settings`;
-- `mcpwhats_state`;
-- `mcpwhats_health`;
-- RLS;
-- grants apenas para backend;
-- segredo interno `mcpwhats_ping_secret`.
-
-## 3. Salvar a URL do projeto no Vault
-
-Use a URL do próprio projeto Supabase:
-
-```sql
-select vault.create_secret(
-  'https://SEU-PROJECT-REF.supabase.co',
-  'mcpwhats_project_url'
-);
-```
-
-Nunca coloque chave backend no SQL versionado.
-
-## 4. Configurar a URL do Render
-
-```sql
-insert into public.mcpwhats_settings(key, value, updated_at)
-values (
-  'render_service_url',
-  to_jsonb('https://mcpwhats-personal.onrender.com'::text),
-  now()
-)
-on conflict (key)
-do update
-set value = excluded.value,
-    updated_at = now();
-```
-
-## 5. Publicar a Edge Function
-
-Função:
-
-```text
+pg_cron
+  */5 * * * *
+       ↓
+pg_net
+       ↓
 mcpwhats-keepalive
+       ↓
+GET https://mcpwhats-personal.onrender.com/health?source=supabase-keepalive
+       ↓
+mcpwhats_health
 ```
 
-Ela precisa aceitar POST do cron e fazer GET no Render.
+Um teste manual já registrou:
 
-Ela:
+```text
+ok = true
+status = 200
+```
 
-1. lê `ping_secret`;
-2. valida o header `x-mcpwhats-ping-secret`;
-3. lê `render_service_url`;
-4. chama `/health?source=supabase-keepalive`;
-5. mede latência;
-6. grava o resultado em `mcpwhats_health`.
+## Recursos
 
-## 6. Criar o cron
+```text
+public.mcpwhats_settings
+public.mcpwhats_health
+Edge Function: mcpwhats-keepalive
+Cron: mcpwhats-render-keepalive
+```
 
-Depois que a função estiver publicada:
+## Autenticação
+
+O cron envia:
+
+```text
+x-mcpwhats-ping-secret
+```
+
+A Edge Function compara esse valor com `mcpwhats_settings.ping_secret`.
+
+O valor do segredo não deve aparecer em GitHub, logs ou documentação.
+
+## Cron reproduzível
+
+Depois de cadastrar o segredo por tooling seguro:
 
 ```sql
 select cron.schedule(
@@ -135,19 +61,11 @@ select cron.schedule(
   '*/5 * * * *',
   $cron$
   select net.http_post(
-    url := (
-      select decrypted_secret
-      from vault.decrypted_secrets
-      where name = 'mcpwhats_project_url'
-    ) || '/functions/v1/mcpwhats-keepalive',
+    url := 'https://SEU-PROJETO.supabase.co/functions/v1/mcpwhats-keepalive',
     headers := jsonb_build_object(
       'Content-Type', 'application/json',
       'x-mcpwhats-ping-secret',
-      (
-        select decrypted_secret
-        from vault.decrypted_secrets
-        where name = 'mcpwhats_ping_secret'
-      )
+      (select value #>> '{}' from public.mcpwhats_settings where key='ping_secret')
     ),
     body := jsonb_build_object('time', now()),
     timeout_milliseconds := 15000
@@ -156,24 +74,13 @@ select cron.schedule(
 );
 ```
 
-## 7. Confirmar que o cron existe
+## Verificação
 
 ```sql
 select jobid, jobname, schedule, active
 from cron.job
-where jobname = 'mcpwhats-render-keepalive';
+where jobname='mcpwhats-render-keepalive';
 ```
-
-Esperado:
-
-```text
-schedule = */5 * * * *
-active   = true
-```
-
-## 8. Confirmar resultados
-
-Depois de uma execução:
 
 ```sql
 select *
@@ -182,104 +89,24 @@ order by created_at desc
 limit 20;
 ```
 
-Para uma execução saudável:
-
-```text
-source     = supabase-keepalive
-ok         = true
-status     = 200
-latency_ms = ...
-```
-
-## 9. Conferir o Render
-
-Nos logs do serviço devem aparecer chamadas ao endpoint de health.
-
-O endpoint usado é:
-
-```text
-/health?source=supabase-keepalive
-```
-
-## 10. Teste manual
-
-Também é possível invocar a Edge Function manualmente com o secret interno para confirmar o fluxo antes de ativar o cron.
-
-Não publique o valor desse secret em logs, issues ou README.
-
-## 11. Desativar temporariamente
-
-Para manter o job cadastrado e apenas desligar:
+## Desativar
 
 ```sql
 select cron.alter_job(
   job_id := (
-    select jobid
-    from cron.job
-    where jobname = 'mcpwhats-render-keepalive'
+    select jobid from cron.job
+    where jobname='mcpwhats-render-keepalive'
   ),
   active := false
 );
 ```
 
-Para reativar:
-
-```sql
-select cron.alter_job(
-  job_id := (
-    select jobid
-    from cron.job
-    where jobname = 'mcpwhats-render-keepalive'
-  ),
-  active := true
-);
-```
-
-## 12. Remover completamente
+## Remover
 
 ```sql
 select cron.unschedule('mcpwhats-render-keepalive');
 ```
 
-## Diagnóstico
+## Observação
 
-### Edge Function retorna 401
-
-Confira:
-
-- secret `mcpwhats_ping_secret`;
-- header `x-mcpwhats-ping-secret`;
-- se o cron aponta para o projeto correto.
-
-### Edge Function retorna 503
-
-Normalmente significa que `render_service_url` não foi configurado.
-
-### Edge Function retorna 502
-
-O Render respondeu com erro, demorou demais ou estava inacessível.
-
-Veja:
-
-```sql
-select *
-from public.mcpwhats_health
-order by created_at desc
-limit 20;
-```
-
-### Render continua dormindo
-
-Confira se:
-
-1. o job está `active=true`;
-2. há execuções em `cron.job_run_details`;
-3. `mcpwhats_health` recebe novas linhas;
-4. o status salvo é 200;
-5. a URL configurada é exatamente o serviço MCPWhats.
-
-## Importante sobre plano Free
-
-O ping a cada 5 minutos pode manter o Web Service ativo e, portanto, consumir as horas gratuitas disponíveis no workspace Render.
-
-O objetivo do keepalive é intencional; acompanhe o consumo do plano.
+O projeto Supabase usado é compartilhado. Não altere jobs, funções ou tabelas de outros sistemas ao fazer manutenção deste keepalive.

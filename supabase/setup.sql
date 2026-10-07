@@ -1,5 +1,7 @@
--- MCPWhats - Supabase setup
--- Execute ONLY in the dedicated MCPWhats Supabase project. Do not apply this schema to Giro or any other existing project.
+-- MCPWhats - schema para Supabase compartilhado
+-- Este arquivo foi desenhado para coexistir com outros sistemas no mesmo projeto.
+-- Ele cria/altera SOMENTE recursos mcpwhats_* e habilita pg_cron/pg_net.
+-- Não coloque segredos reais neste arquivo versionado.
 
 create extension if not exists pg_cron with schema pg_catalog;
 create extension if not exists pg_net with schema extensions;
@@ -17,6 +19,9 @@ create table if not exists public.mcpwhats_state (
   updated_at timestamptz not null default now(),
   primary key (namespace, key)
 );
+
+create index if not exists mcpwhats_state_namespace_updated_idx
+  on public.mcpwhats_state(namespace, updated_at desc);
 
 create table if not exists public.mcpwhats_health (
   id bigint generated always as identity primary key,
@@ -42,35 +47,42 @@ grant select, insert, update, delete on table public.mcpwhats_state to service_r
 grant select, insert on table public.mcpwhats_health to service_role;
 grant usage, select on sequence public.mcpwhats_health_id_seq to service_role;
 
--- Keepalive secrets are intentionally generated server-side.
-do $$
-declare
-  ping_secret text := encode(gen_random_bytes(32), 'hex');
-begin
-  if not exists (select 1 from vault.secrets where name = 'mcpwhats_ping_secret') then
-    perform vault.create_secret(ping_secret, 'mcpwhats_ping_secret');
-    insert into public.mcpwhats_settings(key, value, updated_at)
-    values ('ping_secret', to_jsonb(ping_secret), now())
-    on conflict (key) do update set value = excluded.value, updated_at = now();
-  end if;
-end $$;
+-- Configuração feita por tooling seguro, fora do Git:
+--
+-- sync_secret_sha256:
+--   SHA-256 do MCPWHATS_SYNC_SECRET do Render.
+--
+-- ping_secret:
+--   segredo exclusivo que autentica pg_cron -> mcpwhats-keepalive.
+--
+-- render_service_url:
+--   URL base do Render.
+--
+-- Exemplo SEM valores reais:
+--
+-- insert into public.mcpwhats_settings(key, value)
+-- values ('render_service_url', to_jsonb('https://SEU-SERVICO.onrender.com'::text))
+-- on conflict (key) do update set value=excluded.value, updated_at=now();
 
--- Replace this placeholder only after the dedicated MCPWhats Supabase project exists.
--- select vault.create_secret('https://SEU-PROJETO.supabase.co', 'mcpwhats_project_url');
+-- Edge Functions necessárias:
+--
+-- supabase/functions/mcpwhats-storage/index.ts
+-- supabase/functions/mcpwhats-keepalive/index.ts
+--
+-- Ambas usam autenticação própria do MCPWhats.
 
--- After deploying the mcpwhats-keepalive Edge Function in the dedicated project, schedule it.
--- This cron is the ONLY intended keepalive source for the Render service:
+-- Cron de keepalive, depois de cadastrar ping_secret:
+--
 -- select cron.schedule(
 --   'mcpwhats-render-keepalive',
 --   '*/5 * * * *',
 --   $cron$
 --   select net.http_post(
---     url := (select decrypted_secret from vault.decrypted_secrets where name = 'mcpwhats_project_url')
---            || '/functions/v1/mcpwhats-keepalive',
+--     url := 'https://SEU-PROJETO.supabase.co/functions/v1/mcpwhats-keepalive',
 --     headers := jsonb_build_object(
 --       'Content-Type', 'application/json',
 --       'x-mcpwhats-ping-secret',
---       (select decrypted_secret from vault.decrypted_secrets where name = 'mcpwhats_ping_secret')
+--       (select value #>> '{}' from public.mcpwhats_settings where key='ping_secret')
 --     ),
 --     body := jsonb_build_object('time', now()),
 --     timeout_milliseconds := 15000

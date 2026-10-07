@@ -1,85 +1,155 @@
 # MCPWhats
 
-MCPWhats conecta um WhatsApp pessoal ao ChatGPT por **MCP + OAuth**, expõe uma API REST própria, permite automações/respostas com IA e foi preparado para rodar em um serviço Render exclusivo com persistência separada.
+MCPWhats conecta um WhatsApp pessoal ao ChatGPT por **MCP + OAuth**, com leitura e envio de mensagens, áudio, imagens, respostas citadas, reações, configuração de personalidade/IA e persistência remota.
 
-> **Decisão de arquitetura:** o keepalive do Render deve ser feito pelo **Supabase**, não pelo GitHub Actions.
+## Estado atual — 07/10/2026
 
-## Estado atual
-
-Snapshot: **07/10/2026**.
-
-| Item | Estado |
+| Componente | Estado |
 |---|---|
-| Repositório GitHub | ✅ Ativo |
-| Render `mcpwhats-personal` | ✅ Criado e funcionando |
-| `https://mcpwhats-personal.onrender.com/health` | ✅ HTTP 200 validado |
-| MCP público `/mcp` | ✅ Disponível |
-| WhatsApp/Baileys | 🟡 Aguardando leitura do QR |
-| Render Postgres `mcpwhats-db` | ✅ Criado e separado |
-| Supabase exclusivo `MCPWhats` | ⛔ Ainda não pôde ser criado |
-| Supabase keepalive | ⏸️ Código pronto, não ativado |
-| GitHub keepalive | ❌ Removido |
+| GitHub `Matheuskauanjg/MCPWhats-` | ✅ Ativo |
+| Render `mcpwhats-personal` | ✅ Live |
+| MCP `https://mcpwhats-personal.onrender.com/mcp` | ✅ Ativo |
+| QR `https://mcpwhats-personal.onrender.com/qr` | ✅ Ativo |
+| Plugin privado ChatGPT `MCPWhats` | ✅ v1.3.0 |
+| Supabase compartilhado | ✅ Conectado |
+| Backend de persistência | ✅ `supabase-proxy` |
+| Escrita de configuração | ✅ Testada |
+| Keepalive Supabase → Render | ✅ Ativo e HTTP 200 |
+| WhatsApp | 🟡 Aguardando novo pareamento |
+| GitHub Actions keepalive | ❌ Não usado |
 
-A criação de um novo projeto Supabase Free foi recusada pela própria plataforma porque a conta atingiu o limite de projetos Free ativos. **Nenhum Supabase antigo será reutilizado para o MCPWhats.**
+> **Arquitetura correta:** MCPWhats reutiliza o Supabase compartilhado já existente. O isolamento é feito por tabelas, Edge Functions e segredos com prefixo/escopo MCPWhats. Não é necessário criar outro projeto Supabase.
 
-Leia antes de alterar infraestrutura:
-
-- [Estado atual](docs/CURRENT_STATUS.md)
-- [Arquitetura completa](docs/ARCHITECTURE.md)
-- [Supabase Keepalive](docs/SUPABASE_KEEPALIVE.md)
-- [Checklist de implantação](docs/DEPLOYMENT_CHECKLIST.md)
-- [Troubleshooting](docs/TROUBLESHOOTING.md)
-
----
-
-## Arquitetura final
+## Arquitetura
 
 ```text
-Supabase MCPWhats NOVO
+ChatGPT
+   │ MCP + OAuth
+   ▼
+Render: mcpwhats-personal
    │
-   ├── pg_cron a cada 5 min
-   │       │
-   │       ▼
-   │   Edge Function
-   │   mcpwhats-keepalive
-   │       │
-   │       ▼
-   │   GET /health
+   ├── Baileys / WhatsApp
+   ├── REST API
+   ├── Auto Reply / IA
+   ├── SQLite em /tmp (cache)
+   │
+   └── persistência
+          │
+          ▼
+Supabase compartilhado
    │
    ├── mcpwhats_settings
    ├── mcpwhats_state
-   └── mcpwhats_health
-           │
-           ▼
-Render exclusivo
-mcpwhats-personal
-   │
-   ├── WhatsApp/Baileys
-   ├── MCP/OAuth
-   ├── REST API
-   ├── Auto Reply
-   └── SQLite local/cache
-           │
-           ▼
-Render Postgres
-mcpwhats-db
-(fallback de persistência)
+   ├── mcpwhats_health
+   ├── Edge Function mcpwhats-storage
+   ├── Edge Function mcpwhats-keepalive
+   └── pg_cron → /health a cada 5 min
 ```
 
-O GitHub contém código, configuração, CI e documentação. **O GitHub não é responsável por manter o Render acordado.**
+O Supabase é compartilhado com outros sistemas, mas o MCPWhats não reutiliza as tabelas deles.
 
----
+## Persistência
 
-## Recursos já criados
-
-### Render Web Service
+O modo usado em produção é:
 
 ```text
-Nome: mcpwhats-personal
-URL:  https://mcpwhats-personal.onrender.com
+SUPABASE_URL
+      +
+MCPWHATS_SYNC_SECRET
+      │
+      ▼
+mcpwhats-storage
+      │
+      ▼
+mcpwhats_settings / mcpwhats_state
 ```
 
-Principais endpoints:
+O Render **não precisa receber a service_role do Supabase**. A Edge Function `mcpwhats-storage` possui autenticação própria e usa as credenciais internas do runtime Supabase.
+
+A prioridade do código é:
+
+```text
+1. Supabase direto, se SUPABASE_SECRET_KEY estiver configurado
+2. Supabase proxy, se MCPWHATS_SYNC_SECRET estiver configurado
+3. PostgreSQL por DATABASE_URL
+4. somente cache/arquivos locais
+```
+
+Na instalação atual, `get_mcpwhats_settings` já confirmou:
+
+```text
+persistenceBackend = supabase-proxy
+supabaseEnabled = true
+postgresEnabled = false
+```
+
+Uma escrita real de `runtime_config` também foi confirmada no Supabase.
+
+### Sessão Baileys
+
+Os arquivos da sessão são salvos no namespace:
+
+```text
+mcpwhats_state.namespace = baileys_auth
+```
+
+A sessão anterior foi perdida antes da ligação do Supabase, porque estava apenas em `/tmp`. Portanto é necessário escanear o QR **uma última vez**. Depois do pareamento, o backup da sessão será enviado ao Supabase e poderá ser restaurado após restart/redeploy.
+
+## Supabase compartilhado
+
+Recursos MCPWhats:
+
+```text
+public.mcpwhats_settings
+public.mcpwhats_state
+public.mcpwhats_health
+
+functions/v1/mcpwhats-storage
+functions/v1/mcpwhats-keepalive
+
+cron: mcpwhats-render-keepalive
+```
+
+Todas as tabelas possuem RLS. O acesso de `anon` e `authenticated` foi revogado.
+
+O projeto também possui tabelas e funções de outros sistemas. **Não altere recursos não prefixados com `mcpwhats_` ao fazer manutenção do MCPWhats.**
+
+## Keepalive
+
+O GitHub **não** faz keepalive.
+
+Fluxo:
+
+```text
+Supabase pg_cron
+   │ */5 * * * *
+   ▼
+pg_net
+   ▼
+mcpwhats-keepalive
+   ▼
+GET https://mcpwhats-personal.onrender.com/health?source=supabase-keepalive
+   ▼
+mcpwhats_health
+```
+
+O fluxo foi testado e registrou:
+
+```text
+ok = true
+status = 200
+```
+
+## Render
+
+Serviço:
+
+```text
+mcpwhats-personal
+https://mcpwhats-personal.onrender.com
+```
+
+Rotas:
 
 ```text
 GET  /health
@@ -87,317 +157,50 @@ GET  /qr
 POST /mcp
 GET  /api/status
 GET  /api/chats
+GET  /api/search
 POST /api/send
-...
+POST /api/react
+POST /api/send-image
+POST /api/audio
 ```
 
-### Render PostgreSQL
+Portas internas:
 
-```text
-Nome: mcpwhats-db
-Banco: mcpwhats_db
-```
+| Porta | Uso |
+|---|---|
+| 10000 | proxy público |
+| 10001 | Baileys + REST |
+| 10002 | MCP/OAuth |
+| 10003 | áudio/transcrição |
 
-Esse banco é exclusivo do MCPWhats e pode ser usado quando `DATABASE_URL` estiver configurado.
+## Variáveis do Render
 
-Ele **não substitui o Supabase no keepalive**.
-
----
-
-## Por que o Supabase ainda não está ativo
-
-Foi tentada a criação de um novo projeto:
-
-```text
-Nome: MCPWhats
-Região: sa-east-1
-Plano: Free
-```
-
-O Supabase recusou a criação porque a conta já atingiu o limite de projetos Free ativos.
-
-Para manter o isolamento solicitado:
-
-- nenhum projeto existente foi reutilizado;
-- nenhum projeto foi pausado automaticamente;
-- nenhum projeto foi apagado automaticamente;
-- nenhum cron antigo foi reaproveitado.
-
-Quando uma vaga de projeto estiver disponível, o Supabase exclusivo poderá ser criado e o keepalive será ativado nele.
-
----
-
-# 1. Supabase
-
-## Arquivos
-
-```text
-supabase/setup.sql
-supabase/functions/mcpwhats-keepalive/index.ts
-supabase/functions/mcpwhats-keepalive/deno.json
-```
-
-## O que o projeto exclusivo vai armazenar
-
-Quando configurado, o Supabase pode armazenar:
-
-- sessão Baileys;
-- configurações do MCPWhats;
-- personalidade;
-- estado do auto reply;
-- chats;
-- contatos;
-- mensagens/metadados;
-- mapeamentos LID/JID;
-- histórico do keepalive.
-
-## Tabelas
-
-```text
-mcpwhats_settings
-mcpwhats_state
-mcpwhats_health
-```
-
-As tabelas são criadas com RLS e não devem conceder acesso a `anon` ou `authenticated`.
-
-## Chave backend
-
-Preferência:
+Obrigatórias do serviço:
 
 ```env
-SUPABASE_SECRET_KEY=sb_secret_...
-```
-
-Compatibilidade legada:
-
-```env
-SUPABASE_SERVICE_ROLE_KEY=...
-```
-
-Nunca envie essas chaves para frontend e nunca faça commit delas.
-
----
-
-# 2. Keepalive: Supabase → Render
-
-O fluxo correto é:
-
-```text
-pg_cron
-   │
-   ▼
-net.http_post
-   │
-   ▼
-mcpwhats-keepalive
-   │
-   ▼
-GET https://mcpwhats-personal.onrender.com/health?source=supabase-keepalive
-```
-
-Frequência:
-
-```text
-*/5 * * * *
-```
-
-A Edge Function registra cada tentativa em:
-
-```text
-public.mcpwhats_health
-```
-
-Com:
-
-- sucesso/erro;
-- status HTTP;
-- latência;
-- detalhe;
-- data/hora.
-
-O procedimento completo está em [docs/SUPABASE_KEEPALIVE.md](docs/SUPABASE_KEEPALIVE.md).
-
-## Importante
-
-Não recrie:
-
-```text
-.github/workflows/render-keepalive.yml
-```
-
-Esse workflow foi removido de propósito.
-
----
-
-# 3. Persistência
-
-O MCPWhats aceita três níveis.
-
-## Supabase
-
-Backend preferido quando o projeto exclusivo estiver disponível.
-
-## PostgreSQL pelo `DATABASE_URL`
-
-Fallback remoto, inclusive para o `mcpwhats-db` criado no Render.
-
-Schema:
-
-```text
-render-postgres/setup.sql
-```
-
-Tabela principal:
-
-```text
-mcpwhats_kv
-```
-
-## SQLite local
-
-Cache rápido:
-
-```text
-/tmp/whatsapp.sqlite
-```
-
-No Render Free, `/tmp` é efêmero.
-
-Prioridade:
-
-```text
-Supabase
-   ↓
-PostgreSQL / DATABASE_URL
-   ↓
-SQLite/arquivos locais
-```
-
----
-
-# 4. Render
-
-O repositório possui:
-
-```text
-render.yaml
-```
-
-Ele descreve:
-
-- web service `mcpwhats-personal`;
-- PostgreSQL `mcpwhats-db`;
-- `DATABASE_URL` via vínculo do banco;
-- variáveis não secretas;
-- variáveis secretas como `sync: false`.
-
-Configuração principal:
-
-```text
-Runtime: Node
-Branch: main
-Build: npm install --omit=dev
-Start: npm start
-Health: /health
-```
-
----
-
-# 5. Variáveis de ambiente
-
-Use [.env.example](.env.example).
-
-## Bridge/MCP
-
-```env
-PORT=10000
 PUBLIC_BASE_URL=https://mcpwhats-personal.onrender.com
-
 API_TOKEN=
 MCP_LOGIN_SECRET=
 QR_SECRET=
+
+SUPABASE_URL=
+MCPWHATS_SYNC_SECRET=
 ```
 
-## Persistência PostgreSQL
+Alternativas de persistência:
 
 ```env
-DATABASE_URL=
-PERSISTENCE_BACKUP_INTERVAL_MS=120000
-```
-
-## Supabase
-
-Somente quando existir o projeto Supabase exclusivo:
-
-```env
-SUPABASE_URL=https://SEU-PROJETO.supabase.co
+# acesso Supabase direto, opcional:
 SUPABASE_SECRET_KEY=
+SUPABASE_SERVICE_ROLE_KEY=
+
+# PostgreSQL fallback:
+DATABASE_URL=
 ```
 
-## IA
+Nunca commite valores reais de segredos.
 
-```env
-AI_PROVIDER=auto
-AI_TEMPERATURE=0.82
-
-GROQ_API_KEY=
-GROQ_REPLY_MODEL=openai/gpt-oss-20b
-
-GEMINI_API_KEY=
-GEMINI_REPLY_MODEL=gemini-3.5-flash-lite
-
-NVIDIA_API_KEY=
-NVIDIA_REPLY_MODEL=openai/gpt-oss-20b
-```
-
-`AI_PROVIDER`:
-
-```text
-auto
-groq
-gemini
-nvidia
-```
-
----
-
-# 6. Portas
-
-| Porta | Função |
-|---|---|
-| `10000` | proxy público do Render |
-| `10001` | WhatsApp/Baileys + REST interno |
-| `10002` | MCP/OAuth interno |
-| `10003` | proxy de áudio |
-
----
-
-# 7. Parear WhatsApp
-
-Depois do deploy:
-
-```text
-https://mcpwhats-personal.onrender.com/qr
-```
-
-O endpoint `/health` indica, entre outras coisas:
-
-- estado do WhatsApp;
-- se existe QR;
-- quantidade de chats;
-- caminho do cache SQLite;
-- último erro.
-
-Um estado esperado antes do pareamento é:
-
-```text
-waiting_for_qr_scan
-```
-
----
-
-# 8. MCP + ChatGPT
+## OAuth / Plugin ChatGPT
 
 Endpoint:
 
@@ -405,7 +208,7 @@ Endpoint:
 https://mcpwhats-personal.onrender.com/mcp
 ```
 
-Cliente OAuth interno:
+Cliente:
 
 ```text
 chatgpt-mcpwhats
@@ -419,302 +222,95 @@ https://chatgpt.com/connector_platform_oauth_redirect
 
 Escopos:
 
-- `whatsapp.read`;
-- `whatsapp.send`;
-- `whatsapp.manage`.
+- `whatsapp.read`
+- `whatsapp.send`
+- `whatsapp.manage`
 
----
+O plugin privado existente foi atualizado em vez de duplicado.
 
-# 9. Ferramentas MCP
+## Ferramentas MCP
 
-Entre as ferramentas disponíveis:
+- `whatsapp_status`
+- `list_whatsapp_chats`
+- `read_whatsapp_messages`
+- `read_whatsapp_audio`
+- `search_whatsapp_messages`
+- `whatsapp_storage_stats`
+- `send_whatsapp_message`
+- `react_whatsapp_message`
+- `send_whatsapp_image`
+- `get_mcpwhats_settings`
+- `edit_whatsapp_personality`
+- `configure_whatsapp_ai`
 
-- status do WhatsApp;
-- listar chats;
-- ler mensagens;
-- pesquisar histórico;
-- ler/transcrever áudio;
-- enviar mensagens;
-- responder citando;
-- mencionar;
-- reagir;
-- enviar imagem;
-- consultar armazenamento;
-- consultar configuração;
-- editar personalidade;
-- configurar IA.
+## QR
 
-## Configuração dinâmica
-
-### `get_mcpwhats_settings`
-
-Consulta:
-
-- provedor de IA;
-- modelos;
-- temperatura;
-- personalidade;
-- presença das chaves.
-
-Nunca retorna a chave secreta em si.
-
-### `edit_whatsapp_personality`
-
-Permite alterar comportamento sem redeploy.
-
-Exemplo:
+Abra:
 
 ```text
-Mude a personalidade para responder curto, natural e informal,
-mas use tom profissional quando a conversa for de trabalho.
+https://mcpwhats-personal.onrender.com/qr
 ```
 
-### `configure_whatsapp_ai`
+A página do QR pode ser lida sem colocar `QR_SECRET` na URL. Ações administrativas, como resetar sessão e gerar código de pareamento, continuam protegidas.
 
-Exemplo:
+## IA
 
-```text
-Use NVIDIA como principal e temperatura 0.7.
-```
+Provedores suportados:
 
----
+- Groq
+- NVIDIA NIM
+- Gemini
 
-# 10. Auto Reply
-
-O sistema é orientado por eventos do Baileys.
-
-Controle por:
+Configuração:
 
 ```env
-AUTO_REPLY_CONTROL_JID=
-AUTO_REPLY_CONTROL_NUMBER=
+AI_PROVIDER=auto
+AI_TEMPERATURE=0.82
+GROQ_API_KEY=
+GEMINI_API_KEY=
+NVIDIA_API_KEY=
 ```
 
-Exemplos de comando:
+As chaves continuam em variáveis secretas do Render; as ferramentas MCP alteram somente provedor, modelos, temperatura e personalidade.
 
-```text
-auto on
-auto off
-auto status
+## Render Postgres
 
-ordem: <instrução>
-recado: <contexto>
+O banco `mcpwhats-db` existe como fallback. Na instalação atual ele **não é o backend primário**, porque o Supabase compartilhado está ativo.
 
-ordens
-recados
-agenda
+## Segurança
 
-pausa o automático por 1 hora
-retomar automático
-```
-
----
-
-# 11. REST API
-
-Rotas `/api/*` usam:
-
-```http
-Authorization: Bearer SEU_API_TOKEN
-```
-
-ou:
-
-```http
-x-api-key: SEU_API_TOKEN
-```
-
-Principais endpoints:
-
-```text
-GET  /api/status
-GET  /api/chats?limit=30
-GET  /api/chats/:chatId/messages?limit=30
-GET  /api/search?q=texto
-GET  /api/db-stats
-POST /api/send
-POST /api/react
-POST /api/send-image
-POST /api/audio
-```
-
----
-
-# 12. Segurança
-
-Nunca commite:
+Nunca colocar no GitHub:
 
 ```text
 API_TOKEN
 MCP_LOGIN_SECRET
 QR_SECRET
+MCPWHATS_SYNC_SECRET
+SUPABASE_SECRET_KEY
+SUPABASE_SERVICE_ROLE_KEY
 DATABASE_URL
 GROQ_API_KEY
 GEMINI_API_KEY
 NVIDIA_API_KEY
-SUPABASE_SECRET_KEY
-SUPABASE_SERVICE_ROLE_KEY
 ```
 
-Também não coloque secrets em:
+## Documentação
 
-- Issues;
-- README;
-- logs públicos;
-- screenshots;
-- commits.
+- [Estado atual](docs/CURRENT_STATUS.md)
+- [Arquitetura](docs/ARCHITECTURE.md)
+- [Keepalive Supabase](docs/SUPABASE_KEEPALIVE.md)
+- [Checklist de implantação](docs/DEPLOYMENT_CHECKLIST.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
 
-O `.gitignore` ignora `.env`.
-
----
-
-# 13. Rodar localmente
-
-Requer Node.js 24+.
-
-```bash
-npm install
-npm start
-```
-
-Local:
+## Regra operacional
 
 ```text
-http://localhost:10000/health
-http://localhost:10000/qr
-http://localhost:10000/mcp
-```
+GitHub       = código + CI
+Render       = executa MCPWhats
+Supabase     = persistência + keepalive
+SQLite /tmp  = cache
+Render DB    = fallback
 
-Para expor temporariamente:
-
-```bash
-cloudflared tunnel --url http://localhost:10000
-```
-
-Então use a URL HTTPS gerada em `PUBLIC_BASE_URL`.
-
----
-
-# 14. CI
-
-Workflow:
-
-```text
-.github/workflows/ci.yml
-```
-
-O CI valida:
-
-- sintaxe JavaScript;
-- instalação de dependências;
-- compatibilidade básica do projeto a cada push.
-
-O CI **não faz keepalive**.
-
----
-
-# 15. Troubleshooting
-
-## Render está online mas WhatsApp não está conectado
-
-Abra:
-
-```text
-/health
-/qr
-```
-
-Se aparecer `waiting_for_qr_scan`, pareie o aparelho.
-
-## Auto Reply não funciona
-
-Confira:
-
-1. `auto status`;
-2. `AUTO_REPLY_CONTROL_JID` ou `AUTO_REPLY_CONTROL_NUMBER`;
-3. ao menos uma chave de IA;
-4. modelo/provedor;
-5. logs do Render.
-
-## Configuração não sobrevive ao restart
-
-Confira o backend de persistência:
-
-```text
-Supabase?
-DATABASE_URL?
-somente /tmp?
-```
-
-Se estiver somente em `/tmp`, não existe permanência garantida.
-
-## Supabase não faz ping
-
-Enquanto o projeto exclusivo não existir, isso é esperado.
-
-Depois da criação, confira:
-
-```sql
-select jobid, jobname, schedule, active
-from cron.job
-where jobname = 'mcpwhats-render-keepalive';
-```
-
-E:
-
-```sql
-select *
-from public.mcpwhats_health
-order by created_at desc
-limit 20;
-```
-
----
-
-# 16. Estrutura importante
-
-```text
-.
-├── .github/workflows/ci.yml
-├── docs/
-│   ├── ARCHITECTURE.md
-│   ├── CURRENT_STATUS.md
-│   ├── DEPLOYMENT_CHECKLIST.md
-│   ├── SUPABASE_KEEPALIVE.md
-│   └── TROUBLESHOOTING.md
-├── render-postgres/
-│   └── setup.sql
-├── supabase/
-│   ├── setup.sql
-│   └── functions/
-│       └── mcpwhats-keepalive/
-│           ├── deno.json
-│           └── index.ts
-├── src/
-│   ├── auto-reply-service.js
-│   ├── gateway-entry.js
-│   ├── mcp-gateway-v5.js
-│   ├── persistent-store.js
-│   ├── public-mcp-proxy.js
-│   ├── runtime-config.js
-│   ├── server-media-v2.js
-│   └── supabase-sync.js
-├── .env.example
-├── package.json
-└── render.yaml
-```
-
----
-
-## Resumo da regra operacional
-
-Para evitar confusão futura:
-
-```text
-Render: roda o MCPWhats.
-Supabase: mantém o Render acordado e pode guardar estado.
-Render Postgres: fallback de persistência.
-SQLite: cache local.
-GitHub: código + CI.
-GitHub NÃO faz ping.
+GitHub NÃO faz o ping.
+O Supabase é compartilhado, mas os dados do MCPWhats são isolados.
 ```
