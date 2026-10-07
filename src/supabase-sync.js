@@ -2,24 +2,29 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 const SUPABASE_URL = String(process.env.SUPABASE_URL || '').trim().replace(/\/$/, '');
-const SUPABASE_SERVICE_ROLE_KEY = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+const SUPABASE_ADMIN_KEY = String(process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
 const MAX_AUTH_FILE_BYTES = 2 * 1024 * 1024;
 
 export function isSupabaseEnabled() {
-  return Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
+  return Boolean(SUPABASE_URL && SUPABASE_ADMIN_KEY);
 }
 
 function authHeaders(extra = {}) {
-  return {
-    apikey: SUPABASE_SERVICE_ROLE_KEY,
-    authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+  const headers = {
+    apikey: SUPABASE_ADMIN_KEY,
     'content-type': 'application/json',
     ...extra
   };
+  // Legacy service_role keys are JWTs and may be used as Bearer tokens.
+  // New sb_secret_* keys must be sent as apikey, not Authorization Bearer.
+  if (SUPABASE_ADMIN_KEY.startsWith('eyJ')) {
+    headers.authorization = `Bearer ${SUPABASE_ADMIN_KEY}`;
+  }
+  return headers;
 }
 
 async function rest(table, { method = 'GET', query = '', body, prefer } = {}) {
-  if (!isSupabaseEnabled()) throw new Error('SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY not configured');
+  if (!isSupabaseEnabled()) throw new Error('SUPABASE_URL and SUPABASE_SECRET_KEY/SUPABASE_SERVICE_ROLE_KEY not configured');
   const response = await fetch(`${SUPABASE_URL}/rest/v1/${table}${query ? `?${query}` : ''}`, {
     method,
     headers: authHeaders(prefer ? { prefer } : {}),
