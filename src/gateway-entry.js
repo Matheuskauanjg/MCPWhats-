@@ -2,6 +2,8 @@ import 'dotenv/config';
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { restoreAuthDirectory, startAuthBackupLoop } from './supabase-sync.js';
+import { loadRuntimeConfig } from './runtime-config.js';
 
 const publicPort = Number(process.env.PORT || 10000);
 const bridgePort = Number(process.env.BRIDGE_INTERNAL_PORT || 10001);
@@ -47,7 +49,15 @@ async function ensureBaileysAuthPath() {
   throw new Error('Nenhum diretório gravável disponível para a sessão do WhatsApp.');
 }
 
-await ensureBaileysAuthPath();
+const activeAuthPath = await ensureBaileysAuthPath();
+
+await loadRuntimeConfig();
+try {
+  await restoreAuthDirectory(activeAuthPath);
+} catch (error) {
+  console.warn('[Supabase] Session restore failed:', error?.message || error);
+}
+const stopAuthBackup = startAuthBackupLoop(activeAuthPath);
 
 // 1) Bridge REST/Baileys local.
 process.env.PORT = String(bridgePort);
@@ -69,3 +79,10 @@ await startMcpGateway({ publicPort: mcpGatewayPort, bridgePort, audioPort: audio
 process.env.PORT = String(publicPort);
 const { startPublicMcpProxy } = await import('./public-mcp-proxy.js');
 startPublicMcpProxy({ publicPort, targetPort: mcpGatewayPort });
+
+
+function stopPersistenceLoops() {
+  try { stopAuthBackup?.(); } catch (_) {}
+}
+process.once('SIGTERM', stopPersistenceLoops);
+process.once('SIGINT', stopPersistenceLoops);
