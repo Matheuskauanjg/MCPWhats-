@@ -1,0 +1,19 @@
+name: Keep MCPWhats Render Awake
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ping MCPWhats health
+        run: |
+          set -e
+          status=$(curl -sS -L -o /tmp/mcpwhats-health.json -w "%{http_code}"             --max-time 45             "https://mcpwhats-personal.onrender.com/health?source=github-actions-keepalive")
+          cat /tmp/mcpwhats-health.json || true
+          echo "HTTP $status"
+          test "$status" -ge 200 -a "$status" -lt 400
