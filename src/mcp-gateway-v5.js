@@ -10,7 +10,7 @@ import { getRuntimeConfig, updateRuntimeConfig, runtimeConfigStatus } from './ru
 const ACCESS_TOKEN_TTL_SECONDS = 60 * 60 * 24 * 30;
 const AUTH_CODE_TTL_MS = 5 * 60 * 1000;
 const OAUTH_SCOPES = ['whatsapp.read', 'whatsapp.send', 'whatsapp.manage'];
-const DEFAULT_CLIENT_ID = 'chatgpt-meu-whatsapp';
+const DEFAULT_CLIENT_ID = 'chatgpt-mcpwhats';
 const STABLE_CHATGPT_REDIRECT = 'https://chatgpt.com/connector_platform_oauth_redirect';
 
 const oauthCodes = new Map();
