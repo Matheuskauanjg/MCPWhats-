@@ -23,11 +23,11 @@ function authHeaders(extra = {}) {
   return headers;
 }
 
-async function rest(table, { method = 'GET', query = '', body, prefer } = {}) {
+async function rest(table, { method = 'GET', query = '', body, prefer, headers: extraHeaders = {} } = {}) {
   if (!isSupabaseEnabled()) throw new Error('SUPABASE_URL and SUPABASE_SECRET_KEY/SUPABASE_SERVICE_ROLE_KEY not configured');
   const response = await fetch(`${SUPABASE_URL}/rest/v1/${table}${query ? `?${query}` : ''}`, {
     method,
-    headers: authHeaders(prefer ? { prefer } : {}),
+    headers: authHeaders({ ...extraHeaders, ...(prefer ? { prefer } : {}) }),
     ...(body === undefined ? {} : { body: JSON.stringify(body) })
   });
   const text = await response.text();
@@ -73,6 +73,24 @@ export async function setState(namespace, key, value) {
     body: { namespace: String(namespace), key: String(key), value, updated_at: new Date().toISOString() }
   });
   return true;
+}
+
+export async function listState(namespace, limit = 5000) {
+  if (!isSupabaseEnabled()) return [];
+  const max = Math.max(1, Math.min(Number(limit) || 5000, 20000));
+  const pageSize = 500;
+  const rows = [];
+  for (let start = 0; start < max; start += pageSize) {
+    const end = Math.min(start + pageSize - 1, max - 1);
+    const page = await rest('mcpwhats_state', {
+      query: `namespace=eq.${encodeURIComponent(String(namespace))}&select=key,value,updated_at&order=updated_at.desc`,
+      headers: { range: `${start}-${end}`, 'range-unit': 'items' }
+    });
+    if (!Array.isArray(page) || !page.length) break;
+    rows.push(...page);
+    if (page.length < pageSize) break;
+  }
+  return rows.slice(0, max);
 }
 
 async function walkFiles(root, current = root, out = []) {
