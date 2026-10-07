@@ -5,10 +5,11 @@ import express from 'express';
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import * as z from 'zod/v4';
+import { getRuntimeConfig, updateRuntimeConfig, runtimeConfigStatus } from './runtime-config.js';
 
 const ACCESS_TOKEN_TTL_SECONDS = 60 * 60 * 24 * 30;
 const AUTH_CODE_TTL_MS = 5 * 60 * 1000;
-const OAUTH_SCOPES = ['whatsapp.read', 'whatsapp.send'];
+const OAUTH_SCOPES = ['whatsapp.read', 'whatsapp.send', 'whatsapp.manage'];
 const DEFAULT_CLIENT_ID = 'chatgpt-meu-whatsapp';
 const STABLE_CHATGPT_REDIRECT = 'https://chatgpt.com/connector_platform_oauth_redirect';
 
@@ -160,7 +161,7 @@ export async function startMcpGateway({ publicPort, bridgePort, audioPort }) {
   }
 
   function createWhatsappMcpServer() {
-    const server = new McpServer({ name: 'meu-whatsapp', version: '2.3.0' });
+    const server = new McpServer({ name: 'mcpwhats', version: '3.0.0' });
 
     server.registerTool('whatsapp_status', {
       title: 'Status do WhatsApp',
@@ -251,6 +252,67 @@ export async function startMcpGateway({ publicPort, bridgePort, audioPort }) {
       if (denied) return denied;
       try { return textResult(await internalJson('/api/db-stats')); }
       catch (error) { return errorResult(error.message); }
+    });
+
+    server.registerTool('get_mcpwhats_settings', {
+      title: 'Ver configuração do MCPWhats',
+      description: 'Mostra personalidade, provedor de IA, modelos e quais APIs estão configuradas. Nunca retorna chaves secretas.',
+      inputSchema: z.object({}),
+      ...authDescriptor(['whatsapp.read']),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false }
+    }, async () => {
+      const denied = requireToolAuth(['whatsapp.read']);
+      if (denied) return denied;
+      try { return textResult(runtimeConfigStatus()); }
+      catch (error) { return errorResult(error.message); }
+    });
+
+    server.registerTool('edit_whatsapp_personality', {
+      title: 'Editar personalidade do WhatsApp',
+      description: 'Altera a personalidade/estilo usada pelo auto-reply e persiste no Supabase quando configurado.',
+      inputSchema: z.object({
+        personality: z.string().max(8000).describe('Instruções de personalidade, tom, vocabulário, limites e forma de responder.')
+      }),
+      ...authDescriptor(['whatsapp.manage']),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false }
+    }, async ({ personality }) => {
+      const denied = requireToolAuth(['whatsapp.manage']);
+      if (denied) return denied;
+      try {
+        const updated = await updateRuntimeConfig({ personality });
+        return textResult({ ok: true, personality: updated.personality, persisted: updated.persisted });
+      } catch (error) {
+        return errorResult(error.message);
+      }
+    });
+
+    server.registerTool('configure_whatsapp_ai', {
+      title: 'Configurar IA do WhatsApp',
+      description: 'Escolhe Groq, Gemini, NVIDIA ou fallback automático e permite alterar modelos/temperatura. As chaves de API continuam apenas nas variáveis seguras do servidor.',
+      inputSchema: z.object({
+        provider: z.enum(['auto', 'groq', 'gemini', 'nvidia']).optional(),
+        groqModel: z.string().min(1).max(200).optional(),
+        geminiModel: z.string().min(1).max(200).optional(),
+        nvidiaModel: z.string().min(1).max(200).optional(),
+        temperature: z.number().min(0).max(2).optional()
+      }),
+      ...authDescriptor(['whatsapp.manage']),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false }
+    }, async ({ provider, groqModel, geminiModel, nvidiaModel, temperature }) => {
+      const denied = requireToolAuth(['whatsapp.manage']);
+      if (denied) return denied;
+      try {
+        const patch = {};
+        if (provider !== undefined) patch.aiProvider = provider;
+        if (groqModel !== undefined) patch.groqModel = groqModel;
+        if (geminiModel !== undefined) patch.geminiModel = geminiModel;
+        if (nvidiaModel !== undefined) patch.nvidiaModel = nvidiaModel;
+        if (temperature !== undefined) patch.temperature = temperature;
+        const updated = await updateRuntimeConfig(patch);
+        return textResult({ ok: true, config: getRuntimeConfig(), keys: runtimeConfigStatus().keys, persisted: updated.persisted });
+      } catch (error) {
+        return errorResult(error.message);
+      }
     });
 
     server.registerTool('send_whatsapp_message', {
