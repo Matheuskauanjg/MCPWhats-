@@ -112,8 +112,10 @@ Deno.serve(async (req: Request) => {
       const namespace = safeText(body?.namespace);
       const limit = Math.max(1, Math.min(Number(body?.limit) || 500, 500));
       const offset = Math.max(0, Number(body?.offset) || 0);
+      const keyPrefix = safeText(body?.keyPrefix, 2048);
+      const prefixFilter = keyPrefix ? `&key=like.${encodeURIComponent(keyPrefix + "*")}` : "";
       const r = await dbFetch(
-        `mcpwhats_state?namespace=eq.${encodeURIComponent(namespace)}&select=key,value,updated_at&order=updated_at.desc&limit=${limit}&offset=${offset}`
+        `mcpwhats_state?namespace=eq.${encodeURIComponent(namespace)}${prefixFilter}&select=key,value,updated_at&order=updated_at.${keyPrefix ? 'asc' : 'desc'}&limit=${limit}&offset=${offset}`
       );
       if (!r.ok) throw new Error(`list_state failed: ${r.status}`);
       return new Response(JSON.stringify({ rows: await r.json() }), { headers });
