@@ -1,5 +1,6 @@
 import 'dotenv/config';
 
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import express from 'express';
@@ -43,6 +44,8 @@ const SYNC_FULL_HISTORY = /^(1|true|yes|on)$/i.test(String(process.env.WHATSAPP_
 const MAX_IMAGE_INPUT_BYTES = 12 * 1024 * 1024;
 const MAX_AUDIO_BYTES = 12 * 1024 * 1024;
 const MAX_IMAGE_DOWNLOAD_BYTES = envInt('WHATSAPP_IMAGE_DOWNLOAD_MAX_BYTES', 12 * 1024 * 1024, 1024, 24 * 1024 * 1024);
+const PUBLIC_BASE_URL = String(process.env.PUBLIC_BASE_URL || '').trim().replace(/\/$/, '');
+const pendingImageDownloads = new Map();
 
 let sock = null;
 let whatsappState = 'starting';
@@ -868,6 +871,40 @@ app.post('/api/send-image', requireApiToken, async (req, res) => {
   }
 });
 
+// A single-use, short-lived URL lets authorized callers transfer an image
+// without writing the media to disk or exposing the WhatsApp service API key.
+app.get('/media/whatsapp-image/:token', (req, res) => {
+  const token = String(req.params.token || '');
+  const item = pendingImageDownloads.get(token);
+  pendingImageDownloads.delete(token);
+  if (!item || Date.now() > item.expiresAt) {
+    return res.status(404).json({ error: 'Image link expired or already used' });
+  }
+  res.setHeader('Cache-Control', 'no-store, private');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Type', item.mimetype);
+  res.setHeader('Content-Disposition', `attachment; filename="${item.filename}"`);
+  res.send(item.buffer);
+});
+
+function createTemporaryImageLink(buffer, filename, mimetype) {
+  if (!PUBLIC_BASE_URL.startsWith('https://')) return null;
+  for (const [token, item] of pendingImageDownloads) {
+    if (Date.now() > item.expiresAt) pendingImageDownloads.delete(token);
+  }
+  while (pendingImageDownloads.size >= 8) {
+    pendingImageDownloads.delete(pendingImageDownloads.keys().next().value);
+  }
+  const token = crypto.randomBytes(32).toString('hex');
+  pendingImageDownloads.set(token, {
+    buffer,
+    filename,
+    mimetype,
+    expiresAt: Date.now() + 120000
+  });
+  return `${PUBLIC_BASE_URL}/media/whatsapp-image/${token}`;
+}
+
 app.post('/api/image', requireApiToken, async (req, res) => {
   try {
     if (!isReady()) return res.status(409).json({ error: 'WhatsApp is not ready', state: whatsappState });
@@ -907,12 +944,15 @@ app.post('/api/image', requireApiToken, async (req, res) => {
     const mimetype = String(image.mimetype || 'image/jpeg').split(';')[0].toLowerCase();
     const safeMime = mimetype.startsWith('image/') ? mimetype : 'image/jpeg';
     const safeId = messageId.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 100) || 'image';
+    const filename = `whatsapp-${safeId}.${imageFileExtension(safeMime)}`;
+    const downloadUrl = createTemporaryImageLink(buffer, filename, safeMime);
     res.json({
       ok: true,
       chatId,
       messageId,
       mimetype: safeMime,
-      filename: `whatsapp-${safeId}.${imageFileExtension(safeMime)}`,
+      filename,
+      ...(downloadUrl ? { downloadUrl, downloadLinkExpiresSeconds: 120, downloadLinkOneTime: true } : {}),
       bytes: buffer.length,
       caption: image.caption || '',
       imageBase64: buffer.toString('base64')
