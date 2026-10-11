@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { reviveStoredWhatsAppMessage } from './whatsapp-image-utils.js';
 import { isPersistenceEnabled, persistenceBackend, setState as setRemoteState, listState as listRemoteState } from './supabase-sync.js';
 
 function envInt(name, fallback, min, max) {
@@ -358,6 +359,23 @@ export function createPersistentStore(dbPath) {
     return rows.reverse().map(rowToMessage);
   }
 
+  function listImageMessages(chatId, limit = 100, order = 'oldest') {
+    const direction = order === 'newest' ? 'DESC' : 'ASC';
+    const rows = db.prepare(`
+      SELECT * FROM messages
+      WHERE chat_id=? AND type='imageMessage'
+      ORDER BY COALESCE(ts, 0) ${direction}, updated_at ${direction}
+      LIMIT ?
+    `).all(String(chatId), Math.max(1, Math.min(Number(limit) || 100, 500)));
+    return rows.map(row => {
+      const raw = parseJson(row.raw_json, null);
+      return {
+        ...rowToMessage(row),
+        hasMediaMetadata: Boolean(raw?.message?.imageMessage?.mediaKey)
+      };
+    });
+  }
+
   function searchMessages(query, limit = 100) {
     const q = String(query || '').trim();
     if (!q) return [];
@@ -373,6 +391,12 @@ export function createPersistentStore(dbPath) {
   function getMessage(chatId, messageId) {
     const row = db.prepare(`SELECT * FROM messages WHERE chat_id=? AND message_id=?`).get(String(chatId), String(messageId));
     return row ? rowToMessage(row) : null;
+  }
+
+  function getRawMessage(chatId, messageId) {
+    const row = db.prepare('SELECT raw_json FROM messages WHERE chat_id=? AND message_id=?')
+      .get(String(chatId), String(messageId));
+    return reviveStoredWhatsAppMessage(parseJson(row?.raw_json, null));
   }
 
   function getQuotedMessage(chatId, messageId) {
@@ -445,8 +469,10 @@ export function createPersistentStore(dbPath) {
     inferAndStoreMappings,
     listChats,
     listMessages,
+    listImageMessages,
     searchMessages,
     getMessage,
+    getRawMessage,
     getQuotedMessage,
     getMessageAuthor,
     resolvePreferredJid,

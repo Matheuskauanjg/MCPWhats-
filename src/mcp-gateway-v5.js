@@ -109,6 +109,17 @@ function audioResult(value) {
   };
 }
 
+function imageResult(value) {
+  const { imageBase64, mimetype, ...meta } = value || {};
+  if (!imageBase64) return errorResult('Image payload is empty');
+  return {
+    content: [
+      { type: 'image', data: imageBase64, mimeType: mimetype || 'image/jpeg' },
+      { type: 'text', text: JSON.stringify(meta, null, 2) }
+    ]
+  };
+}
+
 function errorResult(message) {
   return { content: [{ type: 'text', text: String(message) }], isError: true };
 }
@@ -203,6 +214,44 @@ export async function startMcpGateway({ publicPort, bridgePort, audioPort }) {
       if (denied) return denied;
       try { return textResult(await internalJson(`/api/chats/${encodeURIComponent(chatId)}/messages?limit=${encodeURIComponent(limit)}`)); }
       catch (error) { return errorResult(error.message); }
+    });
+
+    server.registerTool('list_whatsapp_images', {
+      title: 'Listar imagens do WhatsApp',
+      description: 'Lista imagens de uma conversa em ordem cronológica, com IDs e indicação de metadados de mídia disponíveis. Use para escolher as primeiras imagens antes de baixar.',
+      inputSchema: z.object({
+        chatId: z.string().min(1),
+        limit: z.number().int().min(1).max(500).default(100),
+        order: z.enum(['oldest', 'newest']).default('oldest')
+      }),
+      ...authDescriptor(['whatsapp.read']),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false }
+    }, async ({ chatId, limit, order }) => {
+      const denied = requireToolAuth(['whatsapp.read']);
+      if (denied) return denied;
+      try {
+        return textResult(await internalJson(`/api/chats/${encodeURIComponent(chatId)}/images?limit=${encodeURIComponent(limit)}&order=${encodeURIComponent(order)}`));
+      } catch (error) { return errorResult(error.message); }
+    });
+
+    server.registerTool('read_whatsapp_image', {
+      title: 'Baixar imagem do WhatsApp',
+      description: 'Baixa a imagem original de uma mensagem por chatId e messageId. Retorna a imagem e seus metadados, quando a mídia ainda estiver disponível no WhatsApp.',
+      inputSchema: z.object({
+        chatId: z.string().min(1),
+        messageId: z.string().min(1)
+      }),
+      ...authDescriptor(['whatsapp.read']),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false }
+    }, async ({ chatId, messageId }) => {
+      const denied = requireToolAuth(['whatsapp.read']);
+      if (denied) return denied;
+      try {
+        return imageResult(await internalJson('/api/image', {
+          method: 'POST',
+          body: JSON.stringify({ chatId, messageId })
+        }));
+      } catch (error) { return errorResult(error.message); }
     });
 
     server.registerTool('read_whatsapp_audio', {
@@ -568,6 +617,8 @@ export async function startMcpGateway({ publicPort, bridgePort, audioPort }) {
         'list_whatsapp_chats',
         'read_whatsapp_messages',
         'read_whatsapp_audio',
+        'list_whatsapp_images',
+        'read_whatsapp_image',
         'search_whatsapp_messages',
         'whatsapp_storage_stats',
         'send_whatsapp_message',

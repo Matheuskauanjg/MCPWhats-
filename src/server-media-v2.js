@@ -14,6 +14,7 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import { createPersistentStore, hydratePersistentStoreFromSupabase } from './persistent-store.js';
 import { whatsappEvents } from './whatsapp-events.js';
+import { imageFileExtension } from './whatsapp-image-utils.js';
 
 const app = express();
 app.use(express.json({ limit: '20mb' }));
@@ -40,6 +41,7 @@ const MAX_MEMORY_CHAT_BUCKETS = envInt('WHATSAPP_MEMORY_CHAT_BUCKETS', 120, 10, 
 const SYNC_FULL_HISTORY = /^(1|true|yes|on)$/i.test(String(process.env.WHATSAPP_SYNC_FULL_HISTORY || 'false'));
 const MAX_IMAGE_INPUT_BYTES = 12 * 1024 * 1024;
 const MAX_AUDIO_BYTES = 12 * 1024 * 1024;
+const MAX_IMAGE_DOWNLOAD_BYTES = envInt('WHATSAPP_IMAGE_DOWNLOAD_MAX_BYTES', 12 * 1024 * 1024, 1024, 24 * 1024 * 1024);
 
 let sock = null;
 let whatsappState = 'starting';
@@ -412,7 +414,10 @@ async function connectWhatsApp() {
     for (const contact of historyContacts || []) upsertContact(contact, false);
     for (const mapping of lidPnMappings || []) persistentStore.upsertLidMapping(mapping?.lid, mapping?.pn, false);
     for (const message of messages || []) {
-      cacheMessage(message, { mirrorRemote: false, cacheInMemory: false, storeRaw: false });
+      // Preserve image metadata for historical downloads, without persisting the raw
+      // payloads of unrelated messages from large WhatsApp history syncs.
+      const storeRaw = Boolean(normalizeMessageContent(message)?.imageMessage);
+      cacheMessage(message, { mirrorRemote: false, cacheInMemory: false, storeRaw });
     }
     console.log(`[Baileys] Histórico local: ${historyChats?.length || 0} chats, ${historyContacts?.length || 0} contatos, ${messages?.length || 0} mensagens (mirror remoto suprimido).`);
   });
@@ -730,6 +735,16 @@ app.get('/api/chats/:chatId/messages', requireApiToken, (req, res) => {
   res.json({ chatId: req.params.chatId, messages: items });
 });
 
+app.get('/api/chats/:chatId/images', requireApiToken, (req, res) => {
+  const limit = Math.min(Math.max(Number(req.query.limit || 100), 1), 500);
+  const order = req.query.order === 'newest' ? 'newest' : 'oldest';
+  res.json({
+    chatId: req.params.chatId,
+    order,
+    images: persistentStore.listImageMessages(req.params.chatId, limit, order)
+  });
+});
+
 app.get('/api/search', requireApiToken, (req, res) => {
   const q = String(req.query.q || '').trim();
   if (!q) return res.status(400).json({ error: 'Query parameter q is required' });
@@ -826,6 +841,59 @@ app.post('/api/send-image', requireApiToken, async (req, res) => {
     const message = error?.name === 'AbortError' ? 'Timed out downloading image' : error.message;
     console.error('[Media] send-image error:', message);
     res.status(400).json({ error: message });
+  }
+});
+
+app.post('/api/image', requireApiToken, async (req, res) => {
+  try {
+    if (!isReady()) return res.status(409).json({ error: 'WhatsApp is not ready', state: whatsappState });
+    const chatId = String(req.body?.chatId || '').trim();
+    const messageId = String(req.body?.messageId || '').trim();
+    if (!chatId || !messageId) return res.status(400).json({ error: 'chatId and messageId are required' });
+
+    // Raw media information survives a restart when captured in the persistent store.
+    // A text-only history record is insufficient to retrieve the encrypted WhatsApp file.
+    const message = findMessage(chatId, messageId) || persistentStore.getRawMessage(chatId, messageId);
+    if (!message) return res.status(404).json({
+      error: 'Image metadata unavailable. The message may predate raw-media persistence; resend the image to recover it.'
+    });
+    const content = normalizeMessageContent(message);
+    const image = content?.imageMessage;
+    if (!image) return res.status(400).json({ error: 'Selected message is not an image message' });
+    if (!image.mediaKey || !(image.url || image.directPath)) {
+      return res.status(410).json({ error: 'Image has no usable WhatsApp media metadata' });
+    }
+
+    const downloaded = await downloadMediaMessage(
+      message,
+      'buffer',
+      {},
+      { logger, reuploadRequest: sock.updateMediaMessage }
+    );
+    const buffer = Buffer.isBuffer(downloaded) ? downloaded : Buffer.from(downloaded || []);
+    if (!buffer.length) return res.status(410).json({ error: 'WhatsApp image is no longer available' });
+    if (buffer.length > MAX_IMAGE_DOWNLOAD_BYTES) {
+      return res.status(413).json({ error: 'WhatsApp image exceeds configured download size limit' });
+    }
+
+    const mimetype = String(image.mimetype || 'image/jpeg').split(';')[0].toLowerCase();
+    const safeMime = mimetype.startsWith('image/') ? mimetype : 'image/jpeg';
+    const safeId = messageId.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 100) || 'image';
+    res.json({
+      ok: true,
+      chatId,
+      messageId,
+      mimetype: safeMime,
+      filename: `whatsapp-${safeId}.${imageFileExtension(safeMime)}`,
+      bytes: buffer.length,
+      caption: image.caption || '',
+      imageBase64: buffer.toString('base64')
+    });
+  } catch (error) {
+    const status = Number(error?.output?.statusCode || error?.statusCode || 400);
+    console.error('[Media] image download error:', error?.message || error);
+    res.status(Number.isInteger(status) && status >= 400 && status < 600 ? status : 400)
+      .json({ error: error?.message || 'Could not download WhatsApp image' });
   }
 });
 

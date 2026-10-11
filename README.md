@@ -237,6 +237,8 @@ O plugin privado existente foi atualizado em vez de duplicado.
 - `list_whatsapp_chats`
 - `read_whatsapp_messages`
 - `read_whatsapp_audio`
+- `list_whatsapp_images` (IDs e ordem cronológica, sem baixar todas as mídias)
+- `read_whatsapp_image` (retorna os bytes originais da imagem por chatId + messageId)
 - `search_whatsapp_messages`
 - `whatsapp_storage_stats`
 - `send_whatsapp_message`
