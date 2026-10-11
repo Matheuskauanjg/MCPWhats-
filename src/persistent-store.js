@@ -15,7 +15,7 @@ const REMOTE_MIRROR_MAX_QUEUE = envInt('REMOTE_MIRROR_MAX_QUEUE', 400, 50, 5000)
 const REMOTE_MIRROR_RETRIES = envInt('REMOTE_MIRROR_RETRIES', 2, 0, 5);
 const REMOTE_HYDRATE_CHATS = envInt('REMOTE_HYDRATE_CHATS', 500, 1, 2000);
 const REMOTE_HYDRATE_CONTACTS = envInt('REMOTE_HYDRATE_CONTACTS', 1500, 1, 5000);
-const REMOTE_HYDRATE_MESSAGES = envInt('REMOTE_HYDRATE_MESSAGES', 1500, 1, 5000);
+const REMOTE_HYDRATE_MESSAGES = envInt('REMOTE_HYDRATE_MESSAGES', 5000, 1, 5000);
 const REMOTE_HYDRATE_MAPPINGS = envInt('REMOTE_HYDRATE_MAPPINGS', 2000, 1, 5000);
 const MAX_REMOTE_RAW_MESSAGE_BYTES = envInt('MAX_REMOTE_RAW_MESSAGE_BYTES', 32768, 0, 262144);
 
@@ -371,7 +371,7 @@ export function createPersistentStore(dbPath) {
       const raw = parseJson(row.raw_json, null);
       return {
         ...rowToMessage(row),
-        hasMediaMetadata: Boolean(raw?.message?.imageMessage?.mediaKey)
+        hasMediaMetadata: Boolean(raw?.message?.imageMessage?.mediaKey || raw?.message?.associatedChildMessage?.message?.imageMessage?.mediaKey)
       };
     });
   }
