@@ -414,8 +414,10 @@ async function connectWhatsApp() {
     for (const contact of historyContacts || []) upsertContact(contact, false);
     for (const mapping of lidPnMappings || []) persistentStore.upsertLidMapping(mapping?.lid, mapping?.pn, false);
     for (const message of messages || []) {
-      // Keep any available encrypted-media metadata locally for future image downloads.
-      cacheMessage(message, { mirrorRemote: false, cacheInMemory: false, storeRaw: true });
+      // Preserve image metadata for historical downloads, without persisting the raw
+      // payloads of unrelated messages from large WhatsApp history syncs.
+      const storeRaw = Boolean(normalizeMessageContent(message)?.imageMessage);
+      cacheMessage(message, { mirrorRemote: false, cacheInMemory: false, storeRaw });
     }
     console.log(`[Baileys] Histórico local: ${historyChats?.length || 0} chats, ${historyContacts?.length || 0} contatos, ${messages?.length || 0} mensagens (mirror remoto suprimido).`);
   });
