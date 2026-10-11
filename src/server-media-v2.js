@@ -14,7 +14,8 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import { createPersistentStore, hydratePersistentStoreFromSupabase } from './persistent-store.js';
 import { whatsappEvents } from './whatsapp-events.js';
-import { imageFileExtension } from './whatsapp-image-utils.js';
+import { imageFileExtension, reviveStoredWhatsAppMessage } from './whatsapp-image-utils.js';
+import { getState, listState } from './supabase-sync.js';
 
 const app = express();
 app.use(express.json({ limit: '20mb' }));
@@ -853,7 +854,11 @@ app.post('/api/image', requireApiToken, async (req, res) => {
 
     // Raw media information survives a restart when captured in the persistent store.
     // A text-only history record is insufficient to retrieve the encrypted WhatsApp file.
-    const message = findMessage(chatId, messageId) || persistentStore.getRawMessage(chatId, messageId);
+    let message = findMessage(chatId, messageId) || persistentStore.getRawMessage(chatId, messageId);
+    if (!message) {
+      const persisted = await getState('message', `${chatId}|${messageId}`);
+      message = reviveStoredWhatsAppMessage(persisted?.rawMessage);
+    }
     if (!message) return res.status(404).json({
       error: 'Image metadata unavailable. The message may predate raw-media persistence; resend the image to recover it.'
     });
