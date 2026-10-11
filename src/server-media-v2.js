@@ -736,14 +736,37 @@ app.get('/api/chats/:chatId/messages', requireApiToken, (req, res) => {
   res.json({ chatId: req.params.chatId, messages: items });
 });
 
-app.get('/api/chats/:chatId/images', requireApiToken, (req, res) => {
+app.get('/api/chats/:chatId/images', requireApiToken, async (req, res) => {
+  const chatId = req.params.chatId;
   const limit = Math.min(Math.max(Number(req.query.limit || 100), 1), 500);
   const order = req.query.order === 'newest' ? 'newest' : 'oldest';
-  res.json({
-    chatId: req.params.chatId,
-    order,
-    images: persistentStore.listImageMessages(req.params.chatId, limit, order)
-  });
+  try {
+    const byId = new Map();
+    for (const row of persistentStore.listImageMessages(chatId, 500, 'oldest')) {
+      byId.set(row.id, row);
+    }
+    // A Render restart can discard the oldest messages from ephemeral SQLite.
+    // Retrieve archived metadata from the authenticated remote store on demand.
+    const remoteRows = await listState('message', 5000);
+    for (const record of remoteRows) {
+      const item = record?.value?.serialized;
+      if (!item || item.chatId !== chatId || item.type !== 'imageMessage' || !item.id) continue;
+      const raw = record?.value?.rawMessage;
+      const media = raw?.message?.imageMessage || raw?.message?.associatedChildMessage?.message?.imageMessage;
+      byId.set(item.id, { ...item, hasMediaMetadata: Boolean(media?.mediaKey), archivedAt: record.updated_at });
+    }
+    const images = Array.from(byId.values()).sort((a, b) => {
+      const delta = (Number(a.timestamp) || 0) - (Number(b.timestamp) || 0);
+      if (delta) return order === 'newest' ? -delta : delta;
+      const at = String(a.archivedAt || '');
+      const bt = String(b.archivedAt || '');
+      return order === 'newest' ? bt.localeCompare(at) : at.localeCompare(bt);
+    }).slice(0, limit).map(({ archivedAt, ...image }) => image);
+    res.json({ chatId, order, images });
+  } catch (error) {
+    console.error('[Media] Archived images lookup failed:', error?.message || error);
+    res.status(502).json({ error: 'Could not list archived WhatsApp images' });
+  }
 });
 
 app.get('/api/search', requireApiToken, (req, res) => {
