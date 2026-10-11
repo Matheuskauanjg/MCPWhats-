@@ -23,5 +23,8 @@ jobs:
           node --check src/auto-reply-service.js
           node --check src/mcp-gateway-v5.js
           node --check src/public-mcp-proxy.js
+          node --check src/whatsapp-image-utils.js
       - name: Validate package install
         run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Run unit tests
+        run: node --test
