@@ -13,13 +13,19 @@ const SETTINGS_NAMESPACE = '__settings__';
 
 let pgPool = null;
 let pgReady = null;
+let postgresPrimary = process.env.MCPWHATS_STORAGE_BACKEND === 'postgres';
+
+export function enablePostgresPrimary() {
+  if (!DATABASE_URL) throw new Error('DATABASE_URL ausente: nao e seguro desconectar Supabase.');
+  postgresPrimary = true;
+}
 
 export function isSupabaseDirectEnabled() {
-  return Boolean(SUPABASE_URL && SUPABASE_ADMIN_KEY);
+  return !postgresPrimary && Boolean(SUPABASE_URL && SUPABASE_ADMIN_KEY);
 }
 
 export function isSupabaseProxyEnabled() {
-  return Boolean(SUPABASE_URL && SUPABASE_SYNC_SECRET);
+  return !postgresPrimary && Boolean(SUPABASE_URL && SUPABASE_SYNC_SECRET);
 }
 
 export function isSupabaseEnabled() {
@@ -267,9 +273,56 @@ function safeRelative(value) {
   return normalized;
 }
 
+
+/**
+ * One-time, non-destructive migration of MCPWhats-only data.
+ * Used before removing MCPWhats resources from a shared Supabase project.
+ * It does not migrate Supabase secrets used only by the old proxy.
+ */
+export async function migrateSupabaseToPostgres() {
+  if (!isPostgresEnabled() || !isSupabaseEnabled()) {
+    throw new Error('A migracao requer DATABASE_URL e conexao Supabase legada.');
+  }
+  const pool = await ensurePostgres();
+  // Only application runtime settings are needed after the proxy/keepalive are removed.
+  const runtimeConfig = await getSetting('runtime_config');
+  if (runtimeConfig !== null) await pgSet(SETTINGS_NAMESPACE, 'runtime_config', runtimeConfig);
+  const namespaces = ['baileys_auth', 'chat', 'contact', 'jid_mapping', 'message'];
+  const totals = {};
+  for (const namespace of namespaces) {
+    const rows = await listState(namespace, 20000);
+    for (let i = 0; i < rows.length; i += 100) {
+      const batch = rows.slice(i, i + 100).map(row => ({
+        key: row.key,
+        value: row.value,
+        updated_at: row.updated_at
+      }));
+      await pool.query(
+        `insert into mcpwhats_kv(namespace, key, value, updated_at)
+         select $1::text, x.key, coalesce(x.value, '{}'::jsonb), coalesce(x.updated_at, now())
+         from jsonb_to_recordset($2::jsonb)
+           as x(key text, value jsonb, updated_at timestamptz)
+         where x.key is not null
+         on conflict (namespace, key)
+         do update set value=excluded.value, updated_at=excluded.updated_at`,
+        [namespace, JSON.stringify(batch)]
+      );
+    }
+    const verification = await pool.query(
+      'select count(*)::int as count from mcpwhats_kv where namespace=$1',
+      [namespace]
+    );
+    const stored = verification.rows?.[0]?.count || 0;
+    if (stored < rows.length) throw new Error(`Migração incompleta: ${namespace} => ${stored}/${rows.length}`);
+    totals[namespace] = rows.length;
+    console.log(`[Persistence] Migracao para Render Postgres: ${namespace} ${rows.length} linhas verificadas.`);
+  }
+  return totals;
+}
+
 export async function restoreAuthDirectory(authDir) {
   if (!isPersistenceEnabled()) return { enabled: false, restored: 0, backend: persistenceBackend() };
-  const rows = await listState('baileys_auth', 1000);
+  const rows = await listState('baileys_auth', 20000);
   if (!Array.isArray(rows) || !rows.length) return { enabled: true, restored: 0, backend: persistenceBackend() };
   await fs.mkdir(authDir, { recursive: true });
   let restored = 0;

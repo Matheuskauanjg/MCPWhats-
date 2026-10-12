@@ -2,7 +2,7 @@ import 'dotenv/config';
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { restoreAuthDirectory, startAuthBackupLoop } from './supabase-sync.js';
+import { restoreAuthDirectory, startAuthBackupLoop, migrateSupabaseToPostgres, enablePostgresPrimary } from './supabase-sync.js';
 import { loadRuntimeConfig } from './runtime-config.js';
 
 const publicPort = Number(process.env.PORT || 10000);
@@ -50,6 +50,12 @@ async function ensureBaileysAuthPath() {
 }
 
 const activeAuthPath = await ensureBaileysAuthPath();
+
+if (process.env.MCPWHATS_MIGRATE_FROM_SUPABASE === 'true') {
+  const migrated = await migrateSupabaseToPostgres();
+  enablePostgresPrimary();
+  console.log('[Persistence] Migracao concluida e Postgres ativado:', JSON.stringify(migrated));
+}
 
 await loadRuntimeConfig();
 try {
