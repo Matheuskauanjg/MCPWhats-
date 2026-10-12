@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import pg from 'pg';
 
 const { Pool } = pg;
@@ -13,6 +14,7 @@ const SETTINGS_NAMESPACE = '__settings__';
 
 let pgPool = null;
 let pgReady = null;
+const authBackupHashes = new Map();
 let postgresPrimary = process.env.MCPWHATS_STORAGE_BACKEND === 'postgres';
 
 export function enablePostgresPrimary() {
@@ -349,11 +351,14 @@ export async function backupAuthDirectory(authDir) {
     const stat = await fs.stat(file.absolute).catch(() => null);
     if (!stat || stat.size <= 0 || stat.size > MAX_AUTH_FILE_BYTES) continue;
     const content = await fs.readFile(file.absolute);
+    const digest = crypto.createHash('sha256').update(content).digest('hex');
+    if (authBackupHashes.get(file.relative) === digest) continue;
     await setState('baileys_auth', file.relative, {
       base64: content.toString('base64'),
       bytes: content.length,
       backedUpAt: new Date().toISOString()
     });
+    authBackupHashes.set(file.relative, digest);
     backedUp += 1;
   }
   if (backedUp) console.log(`[Persistence] Backed up ${backedUp} Baileys auth file(s) to ${persistenceBackend()}.`);
